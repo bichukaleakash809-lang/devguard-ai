@@ -253,15 +253,14 @@ async def run_pipeline_resilient(request: ScanRequest) -> ScanResult:
 @telemetry.traced("llm_invoke")
 async def _invoke(request: ScanRequest, model_id: str) -> ScanResult:
     """
-    Thin wrapper around the AI module's run_pipeline, pinning a model.
+    Thin wrapper around the AI module's run_pipeline.
 
-    We pass model_id through so the AI module's select_model routing can be
-    overridden during degradation. If run_pipeline doesn't accept model_id, adapt
-    here — the contract boundary is intentionally in one place.
+    INTEGRATION NOTE: ai_agent.run_pipeline() takes a raw code string and does
+    its own internal severity-based routing (select_model) — it has no model
+    override hook. We extract request.code here (not the ScanRequest object)
+    and record model_id only as a span attribute for observability, since the
+    breaker's routing intent is still worth seeing in traces even though the
+    AI layer doesn't act on it directly.
     """
     telemetry.trace.get_current_span().set_attribute("llm.model_id", model_id)
-    try:
-        return await run_pipeline(request, model_id=model_id)
-    except TypeError:
-        # Backward-compatible: AI module version without model override.
-        return await run_pipeline(request)
+    return await run_pipeline(request.code)

@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from backend.core import telemetry, cache
 from backend.api.router import router
+from fastapi.middleware.cors import CORSMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -10,8 +11,17 @@ async def lifespan(app: FastAPI):
     await cache.init_cache()
     yield
     await cache.close_cache()
-    telemetry.shutdown_telemetry()  # flush the last spans of any incident
+    telemetry.shutdown_telemetry()
 
 app = FastAPI(title="DevGuard AI", lifespan=lifespan)
-FastAPIInstrumentor.instrument_app(app)  # honors incoming traceparent automatically
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+FastAPIInstrumentor.instrument_app(app)
 app.include_router(router)
