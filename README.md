@@ -1,148 +1,117 @@
 # 🛡️ DevGuard AI
 
-> **DevGuard doesn't just generate a fix — it validates, retries, and proves its own work, hash-chained and fully traced, the way a real fintech compliance system would demand.**
+**DevGuard doesn't just get observed — it observes itself, and adapts.**
 
-An autonomous, self-correcting security-review pipeline. Paste vulnerable code, and a multi-agent system scans it, generates a fix, *validates its own fix*, retries until a validator agent passes it, and writes an immutable, hash-chained audit record — every step emitting OpenTelemetry spans you can inspect live in SigNoz.
+An autonomous, self-healing AI security pipeline that scans code for vulnerabilities, fixes them through a Scanner → Fixer → Validator reflection loop, and — uniquely — **queries its own SigNoz telemetry (via MCP) to change its own runtime behavior**, not just to fill a dashboard for a human to read later.
 
-![Build](https://img.shields.io/badge/build-passing-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Next.js](https://img.shields.io/badge/Next.js-14-black?logo=next.js)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?logo=fastapi)
-![Groq](https://img.shields.io/badge/LLM-Groq-orange)
-![OpenTelemetry](https://img.shields.io/badge/observability-SigNoz-7c3aed)
+Built for the [Agents of SigNoz](https://www.wemakedevs.org/hackathons/signoz) hackathon (OpenAI Agent Builder + SigNoz Observability tracks).
 
 ---
 
-## The Problem (and its cost)
+## The Problem
 
-Manual security code review costs an average of **$80–120/hour** and a single senior reviewer clears only a few hundred lines per hour — so a mid-size PR can burn **half a day of expert time** before it merges. Worse, human reviewers miss an estimated **~30% of injection-class vulnerabilities** under deadline pressure. DevGuard collapses that loop to **sub-second, sub-cent** automated review with a provable accuracy benchmark and a compliance-grade audit trail.
+Manual security code review costs organizations roughly **$85/hour of engineer time**, doesn't scale with commit velocity, and catches vulnerabilities *after* they're merged, not before. DevGuard AI turns that into an automated, self-verifying, fully-traced pipeline that runs in seconds, not hours — and unlike a typical LLM wrapper, it proves its own work: every fix is adversarially reviewed, retried until it passes a quality bar, hash-chained into an audit trail, and fully traced end-to-end in SigNoz.
+
+## The Differentiator: Self-Observation
+
+Every other AI-observability integration treats telemetry as something *recorded for humans* — dashboards, traces, alerts someone reads after the fact. DevGuard's agents read their **own** recent telemetry, live, in the same request path, and use it to change what they do next:
+
+```mermaid
+flowchart TD
+    A[POST /scan] --> B[Scanner Agent]
+    B --> C{Reflection Loop}
+    C -->|Fixer Agent| D[Validator Agent]
+    D -->|score >= 85 & pass| E[Converged Result]
+    D -->|score < 85| C
+
+    subgraph SelfObservation ["🔁 Self-Observation Loop"]
+        F[SigNoz MCP Client] -->|recent cost trend| G[Telemetry-Aware Router]
+        F -->|CWE failure history| H[Pattern-Learning Agent]
+        F -->|cumulative spend| I[Cost Guardian]
+        J[Circuit Breaker OPEN] --> K[Postmortem Agent]
+    end
+
+    G -->|adjusts model tier| C
+    H -->|adjusts RAG context k| B
+    I -->|conservation mode| G
+    K -->|root-cause summary| L[Audit Trail]
+
+    C --> M[OpenTelemetry Spans]
+    M --> N[(SigNoz)]
+    N -.->|queried back| F
+```
+
+| Loop | Telemetry In | Decision Out |
+|---|---|---|
+| **Telemetry-Aware Router** | Recent 30-min LLM spend | Downgrades model tier under cost pressure — **never for `critical` severity**, a hard-coded safety floor |
+| **Pattern-Learning Agent** | Historical Validator fail-rate per CWE | Elevates RAG retrieval depth (`k`) for CWE classes with a track record of needing more context |
+| **Cost Guardian** | Cumulative session spend | Flips a global conservation-mode flag respected by the router |
+| **Postmortem Agent** | The error burst that just tripped the circuit breaker | Writes a 2-3 sentence plain-English root cause the moment the breaker opens |
+
+Every adaptation is: **(a)** returned in the API response as `self_observation`, so a human never has to dig through SigNoz to see it fired, and **(b)** stamped back onto the active span, so it's *also* visible inside SigNoz, right next to the scan it influenced. Fail-safe throughout: if SigNoz/MCP is slow or down, every one of these degrades to "behave exactly as if this layer didn't exist" — telemetry is an optimization, never a dependency the user-facing scan can fail on.
 
 ---
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    U[Developer] -->|paste code| FE[Next.js 14 Frontend<br/>Vercel]
-    FE -->|POST /scan| API[FastAPI Backend<br/>Railway/Render]
-    FE -.->|/ws/scan/:id| API
-
-    subgraph Agents["Multi-Agent Core"]
-        SA[Scanner Agent] --> RT{Severity<br/>Router}
-        RT -->|high| FA[Fix Agent<br/>large model]
-        RT -->|low| FAS[Fix Agent<br/>small model]
-        FA --> VA[Validator Agent]
-        FAS --> VA
-        VA -->|score < threshold| REF[Reflection Loop<br/>retry] --> FA
-        VA -->|score >= threshold| DONE[Approved Fix]
-    end
-
-    API --> Agents
-    API -->|LLM calls| GROQ[(Groq API)]
-    API -->|cache / state| REDIS[(Upstash Redis)]
-    API -->|hash-chain| AUDIT[(Immutable Audit Log)]
-    Agents -->|OTEL spans| OTEL[OTLP Exporter]
-    OTEL --> SIGNOZ[SigNoz Cloud]
-    DONE --> HITL{Critical?}
-    HITL -->|yes| APPROVE[Human-in-the-Loop Gate]
-    HITL -->|no| RESULT[Result Dashboard]
-    APPROVE --> RESULT
-```
-
----
-
-## What makes it different
-
-- **Self-correcting reflection loop** — the Fix Agent's output is graded by an independent Validator Agent; if it fails, the system retries with the critique fed back in. The result screen *exposes* this loop (`Fix Agent: 2 attempts → Validator score 91/100 ✅`) instead of hiding it.
-- **Severity-based model routing** — critical CWEs route to a larger model; trivial ones route to a cheaper/faster one, optimizing cost and latency per scan.
-- **Immutable hash-chained audit trail** — every scan is chained to the previous (`prev_hash`), and `/audit-log/verify` re-walks the chain to prove nothing was tampered with.
-- **Real distributed tracing** — not a claim. Every agent span is exported via OpenTelemetry and viewable in SigNoz, one click from the result page.
-- **Provable accuracy** — a benchmark harness scores the Scanner Agent against labeled OWASP snippets and surfaces precision/recall/FPR on the dashboard.
-
----
-
-## Tech Stack
-
-| Layer | Tech |
+| Layer | Technology |
 |---|---|
-| Frontend | Next.js 14 (App Router), TypeScript, Tailwind, Framer Motion, Monaco diff editor |
-| Backend | FastAPI, Python 3.11, async httpx |
-| LLM | Groq (severity-routed model tiers) |
-| State / Cache | Redis (Upstash) |
-| Observability | OpenTelemetry → SigNoz |
-| Deploy | Vercel (FE) · Railway/Render (BE) · Docker Compose (local) |
+| Frontend | Next.js 14 (App Router), TypeScript, Tailwind, Framer Motion, Monaco Editor |
+| Backend | FastAPI, Python 3.12, async throughout |
+| AI Engine | Groq (Llama 3.3 70B / 3.1 8B — severity + telemetry-routed), swap point marked for GPT-5.6 |
+| Vector Store | In-process CWE/OWASP RAG store |
+| Observability | OpenTelemetry → SigNoz (self-hosted via SigNoz Foundry) |
+| Resilience | Custom circuit breaker with fallback routing |
+| Reproducibility | `casting.yaml` + `casting.yaml.lock` (Foundry) |
 
----
+## Core Features
 
-## Quick Start (local, one command)
+- **Multi-agent reflection loop** — Scanner → Fixer → Validator, up to 3 bounded retries, full history retained
+- **Structured output everywhere** — every agent boundary is a strict Pydantic contract, no regex parsing
+- **Severity-based + telemetry-aware model routing**
+- **Full distributed tracing** — every agent, every reflection attempt, every self-observation decision is a span
+- **Circuit breaker + graceful degradation** with an AI-generated postmortem the moment it trips
+- **Hash-chained, tamper-evident audit trail**
+- **Human-in-the-loop approval gate** for critical/high severity fixes
+- **Accuracy benchmark harness** against labeled OWASP snippets (precision/recall/FPR)
+- **Self-observing agent layer** (see above) — the core differentiator
+
+## Quickstart (local)
 
 ```bash
-git clone https://github.com/<you>/devguard-ai.git
+git clone https://github.com/bichukaleakash809-lang/devguard-ai.git
 cd devguard-ai
-cp .env.example .env        # add your GROQ_API_KEY
-docker compose up           # frontend :3000 · backend :8000 · redis · signoz
-```
+cp .env.example .env   # add your GROQ_API_KEY
 
-Then open http://localhost:3000, paste a vulnerable snippet, and hit **Run Scan**.
+# Stand up SigNoz locally via Foundry (required — see casting.yaml)
+foundryctl cast -f casting.yaml
 
-### Manual (dev) setup
-
-```bash
 # Backend
-cd backend && pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python -m uvicorn backend.main:app --reload --port 8001
 
 # Frontend
-cd frontend && npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+cd frontend && npm install && npm run dev
 ```
 
----
+Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI Agent**.
 
-## Environment Variables
+## SigNoz Usage
 
-| Var | Where | Purpose |
-|---|---|---|
-| `GROQ_API_KEY` | backend | LLM access |
-| `REDIS_URL` | backend | cache + scan state |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | backend | span export to SigNoz |
-| `NEXT_PUBLIC_API_URL` | frontend | backend base URL |
-| `NEXT_PUBLIC_SIGNOZ_URL` | frontend | SigNoz base for the "Investigate" CTA |
+- **Traces** — every scan is one distributed trace: `devguard_pipeline → scanner_agent / fixer_agent / validator_agent`, plus self-observation spans
+- **Dashboards** — `signoz/dashboard.json`, including adaptive-routing-override frequency and cumulative cost vs. conservation threshold
+- **Alerts** — `signoz/alerts.md`: SLO degradation, circuit breaker stuck open, cost budget exceeded
+- **MCP** — the self-observation layer queries SigNoz's MCP server directly from agent code (see `backend/core/mcp_client.py`); falls back to a local in-process cost shadow when the MCP call path is unavailable, so the demo is never dependent on network conditions
 
----
+## Reproducibility
 
-## Demo
-
-📺 **Video / GIF:** _`<paste your 2-minute demo link here>`_
-
-See [`DEMO_SCRIPT.md`](./DEMO_SCRIPT.md) for the timestamped walkthrough.
-
----
-## Load / Concurrency Proof
-
-Ran `scripts/load_test.py --concurrency 30 --total 60` against the deployed backend:
-
-=== DevGuard Load Test ===
-concurrency=30  total=60  wall=4.71s  throughput=12.7 req/s
-success=60  errors=0  status_breakdown={200: 60}
-latency ms  p50=812  p90=1640  p99=2210  mean=980
-verdict: PASS ✅ (no 5xx, spike absorbed)
-
-**Interpretation:** Under a 30-way concurrent burst, zero 5xx responses. The
-Redis cache absorbed repeated identical payloads (p50 well under the cold-path
-latency), and the LLM circuit breaker kept tail latency bounded (p99 ≈ 2.2s)
-rather than cascading into failures. This is the evidence behind the
-"production-ready" claim — not an assertion, a measurement.
-
-
-## Deployment
-
-Full step-by-step (Vercel + Railway + Upstash + SigNoz Cloud) in [`DEPLOYMENT.md`](./DEPLOYMENT.md).
-
-## Security & Red-Team notes
-
-Prompt-injection resistance and threat model in [`SECURITY.md`](./SECURITY.md).
+Judges can re-run the exact SigNoz deployment used for this submission:
+```bash
+foundryctl cast -f casting.yaml
+```
+`casting.yaml.lock` pins the resolved configuration.
 
 ## License
 
-MIT © 2026 DevGuard AI
+MIT
