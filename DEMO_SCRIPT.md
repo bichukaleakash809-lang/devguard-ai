@@ -1,58 +1,85 @@
-# DevGuard AI — 2-Minute Demo Script
 
-> Goal: make judges *feel* the engineering weight and leave them with one quotable differentiator. Every second is budgeted. Rehearse until you hit 1:55, leaving 5s of buffer.
+# 🎬 DevGuard AI — 2-Minute Demo Script
 
----
-
-### `0:00 – 0:15` — The hook (problem + cost)
-> "Manual security review costs eighty to a hundred and twenty dollars an hour, and human reviewers still miss roughly a third of injection bugs under deadline pressure. DevGuard does that review in under a second, for a fraction of a cent — and it proves its own work."
-
-*(On screen: Page 1 landing, cursor ready in the code box.)*
+**Prep before recording:**
+- Terminal with backend running (visible if you want to flash to it)
+- Browser: Page 1 open, tab for SigNoz Traces ready
+- Have TWO code snippets ready to paste: (1) a `critical` SQLi snippet, (2) a `low/medium` MD5 snippet — the contrast is the whole point of the wow moment
+- Set `COST_BUDGET_USD_PER_30MIN` low enough beforehand that the second scan visibly triggers an override (or just run a few scans before recording to naturally cross the threshold)
 
 ---
 
-### `0:15 – 0:45` — Page 1: the scan
-> "I'll paste a login function with a classic SQL injection."
+## 0:00 – 0:15 | The Hook (cost/problem framing)
 
-- Paste the vulnerable snippet. Click **Run Scan**.
-- **Let the laser-scan animation play** — don't talk over the first beat.
-> "Watch the agents light up live — scanner, then fix agent, then the validator. This is real-time status streamed over a WebSocket, not a loading spinner."
+**Say:**
+> "Manual security code review costs about $85 an hour and doesn't scale with how fast teams ship. DevGuard AI does it in seconds — and unlike a typical AI wrapper, it proves its own work, and it watches its own telemetry to decide how to spend its budget. Let me show you."
 
----
-
-### `0:45 – 1:30` — Page 2: the payoff (the money segment)
-*(Page transitions; cinematic staggered entrance plays.)*
-
-> "Here's the report. On the left, the exact diff — before and after, with the vulnerable lines flagged. Top right, the CVSS score dropped from 7.8 HIGH to 1.2 LOW."
-
-- Point to the metric cards counting up.
-> "Latency, tokens, and cost — counting up live. This scan cost fractions of a cent versus eighty-five dollars for an hour of human review."
-
-**⭐ THE WOW MOMENT — slow down, point directly at the reflection panel:**
-> "This is what nobody else built. The Fix Agent's *first* attempt didn't pass — see it? Attempt one scored 74. So the system **critiqued its own fix and retried**, and attempt two passed at 91. This is a self-correcting AI that refuses to ship work it can't validate."
-
-- Then point at the benchmark strip:
-> "And this isn't vibes — the Scanner Agent is benchmarked at 92% accuracy, 95% recall against labeled OWASP snippets. There's the number."
+**Show:** DevGuard AI Page 1, clean and idle.
 
 ---
 
-### `1:30 – 1:50` — The proof: real distributed tracing
-- Click **Investigate in SigNoz**.
-> "Every agent step emits an OpenTelemetry span. One click and we're in a real distributed trace in SigNoz — scanner, fix, the retry, the validator, cost calc. This is production observability, live, not a screenshot."
+## 0:15 – 0:45 | Page 1 — Scan a critical vulnerability
 
-*(Show the trace tree for ~5 seconds.)*
+**Do:** Paste the SQLi snippet, click **"Run DevGuard AI Agent."**
 
----
+**Say (while the laser-scan animation runs):**
+> "This is a real SQL injection. Watch the live agent status — Scanner, Fixer, Validator, all traced end-to-end."
 
-### `1:50 – 2:00` — The close (the differentiator line)
-> **"DevGuard doesn't just generate a fix — it validates, retries, and proves its own work, hash-chained and fully traced, the way a real fintech compliance system would demand. That's the difference between a demo and a product."**
-
-*(End on the audit-trail footer: ✅ Chain Verified.)*
+**Show:** Live status text updating, then the transition to Page 2.
 
 ---
 
-## Delivery notes
-- **Pause after the laser scan and after the reflection reveal** — those two silences are where judges form their impression. Don't rush them.
-- If live deploy stalls, cut to `docker compose up` locally without breaking narration — the script is identical.
-- Have the SigNoz tab pre-authenticated so the CTA lands instantly; a login screen kills momentum.
-- Keep the tab count to two (app + SigNoz). Zero fumbling.
+## 0:45 – 1:30 | Page 2 — The reveal (the core "wow")
+
+**Say:**
+> "Here's the diff — parameterized query, fix applied. Latency, tokens, cost, all real."
+
+**Point at the "Model routing & self-correction" panel:**
+> "Because this is critical severity, it routed to the strongest model — and that's a hard-coded safety floor. Cost pressure can NEVER downgrade a critical fix. Watch what happens with a lower-severity scan."
+
+**Do:** Click "New scan," paste the MD5/weak-hash snippet, run it.
+
+**Say (on Page 2, pointing at the self-observation panel/routing override):**
+> "This one is medium severity — and here, the agent checked its own recent spend through SigNoz's MCP server, saw it was over budget, and downgraded the model itself. That decision — 'cost_budget_exceeded' — isn't something I coded as a fixed rule for this snippet. It's the agent reading its own telemetry and deciding, live, in the same request. This is the differentiator: DevGuard doesn't just get observed — it observes itself, and adapts."
+
+**Show:** The benchmark accuracy strip (92% / 88% / 95% / 5% FPR) — one beat, don't dwell.
+
+---
+
+## 1:30 – 1:50 | SigNoz — the proof
+
+**Do:** Click **"Investigate this trace in SigNoz."**
+
+**Say:**
+> "And here's the real trace — Scanner, Fixer, Validator as nested spans, plus the routing-override decision stamped right onto the trace. Nothing hidden, fully reproducible — the whole SigNoz stack is deployed via Foundry, `casting.yaml` is in the repo, you can spin up the exact same setup yourself."
+
+**Show:** SigNoz Trace Detail waterfall, briefly hover the routing-override span attribute if visible.
+
+---
+
+## 1:50 – 2:00 | Close — the differentiator line
+
+**Say (straight to camera):**
+> "DevGuard doesn't just get observed — it observes itself, and adapts. That's DevGuard AI."
+
+**Show:** README/GitHub repo page for one beat as the final frame.
+
+---
+
+## Timing Cheat Sheet
+
+| Time | Beat |
+|---|---|
+| 0:00–0:15 | Hook |
+| 0:15–0:45 | Page 1, critical scan |
+| 0:45–1:10 | Page 2 reveal, safety floor explained |
+| 1:10–1:30 | Second scan, self-observation override — **the wow moment** |
+| 1:30–1:50 | SigNoz trace proof |
+| 1:50–2:00 | Differentiator line + close |
+
+## If something breaks live
+
+- If the cost override doesn't trigger on camera: mention it happened during rehearsal and show a screenshot/pre-recorded clip of the JSON response with `routing_override` populated — don't waste demo time debugging live.
+- If SigNoz is slow to load: have the Trace Detail screenshot ready as a fallback cut.
+
+
