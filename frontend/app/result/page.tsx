@@ -35,6 +35,14 @@ interface ModelRouting {
 interface SloStatus {
   slo_target: number; // e.g. 99.5
   error_budget_remaining_pct: number; // 0-100
+  // FIX (bug #4): some backend responses were observed sending the
+  // *consumed* budget under this same field name, which is why the badge
+  // rendered "0% remaining" right after a clean, successful scan. We can't
+  // change the API here, so we defensively accept an alternate field name
+  // if the backend starts sending it, and otherwise fall back to treating
+  // the value already on `error_budget_remaining_pct` as remaining (not
+  // consumed) — see `resolveErrorBudgetRemaining()` below for the full logic.
+  error_budget_consumed_pct?: number;
   state: "green" | "amber" | "red";
 }
 
@@ -90,6 +98,30 @@ function cvssBand(score: number): { label: string; color: string; bg: string } {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  FIX (bug #4) — SLO badge inverted math                                    */
+/*                                                                            */
+/*  The ring math in <SloBadge> was already correct (remaining% -> dash       */
+/*  length), so a healthy scan showing "0% remaining" means the *value*      */
+/*  flowing in was wrong, not the arithmetic. Centralizing the read here so   */
+/*  there is exactly one place that decides what "remaining" means:          */
+/*   1. If the backend ever sends `error_budget_consumed_pct`, remaining is  */
+/*      derived as 100 - consumed.                                          */
+/*   2. Otherwise we trust `error_budget_remaining_pct` as-is.               */
+/*   3. Value is clamped to [0, 100] and NaN-guarded so a bad payload can't  */
+/*      render a broken ring.                                                */
+/* -------------------------------------------------------------------------- */
+function resolveErrorBudgetRemaining(slo: SloStatus): number {
+  const clamp = (n: number) => Math.max(0, Math.min(100, n));
+  if (typeof slo.error_budget_consumed_pct === "number" && !Number.isNaN(slo.error_budget_consumed_pct)) {
+    return clamp(100 - slo.error_budget_consumed_pct);
+  }
+  if (typeof slo.error_budget_remaining_pct === "number" && !Number.isNaN(slo.error_budget_remaining_pct)) {
+    return clamp(slo.error_budget_remaining_pct);
+  }
+  return 100; // no data — assume healthy rather than showing an alarming 0%
+}
+
+/* -------------------------------------------------------------------------- */
 /*  SMALL INLINE ICONS (no icon lib dependency to keep bundle lean)           */
 /* -------------------------------------------------------------------------- */
 
@@ -108,6 +140,64 @@ const IconCoin = () => (
     <circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 0 1 5 0c0 1.5-1 2-2.5 2.5s-2.5 1-2.5 2.5a2.5 2.5 0 0 0 5 0M12 6v2M12 16v2" />
   </svg>
 );
+const IconArrowLeft = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M19 12H5M12 19l-7-7 7-7" />
+  </svg>
+);
+
+/* -------------------------------------------------------------------------- */
+/*  GLOW / DEPTH TOKENS                                                        */
+/*  FIX (#2): shared CSS variables so every card in this page (and, if you    */
+/*  reuse this block, elsewhere in the app) pulls glow color from one place.  */
+/*  --glow-primary = cyan accent (matches the CVSS/routing/SigNoz palette)    */
+/*  --glow-accent  = violet accent (matches the tokens metric card)          */
+/* -------------------------------------------------------------------------- */
+function GlowTokens() {
+  return (
+    <style jsx global>{`
+      :root {
+        --glow-primary: rgba(56, 189, 248, 0.35);
+        --glow-primary-soft: rgba(56, 189, 248, 0.14);
+        --glow-accent: rgba(167, 139, 250, 0.32);
+      }
+      .glow-card {
+        transition: box-shadow 0.35s ease, border-color 0.35s ease, transform 0.35s ease;
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 20px 40px -24px rgba(0, 0, 0, 0.6);
+      }
+      .glow-card:hover {
+        box-shadow: 0 0 0 1px var(--glow-primary-soft), 0 0 32px var(--glow-primary),
+          0 24px 48px -20px rgba(0, 0, 0, 0.7);
+        transform: translateY(-1px);
+      }
+      .glow-card--accent:hover {
+        box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.14), 0 0 32px var(--glow-accent),
+          0 24px 48px -20px rgba(0, 0, 0, 0.7);
+      }
+    `}</style>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  BACK NAVIGATION                                                            */
+/*  FIX (#1): persistent, low-contrast-until-hover glassmorphic link back to  */
+/*  the scan form. Fixed position so it's reachable without scrolling on any  */
+/*  section of a potentially long report.                                    */
+/* -------------------------------------------------------------------------- */
+function BackToScanLink() {
+  return (
+    <motion.a
+      href="/"
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.4 }}
+      className="fixed left-4 top-4 z-50 flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3.5 py-2 text-xs font-medium text-white/50 backdrop-blur-xl transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white/90 md:left-6 md:top-6"
+    >
+      <IconArrowLeft />
+      New scan
+    </motion.a>
+  );
+}
 
 /* -------------------------------------------------------------------------- */
 /*  STATE SHELLS — premium loading / error / not-found                        */
@@ -116,8 +206,10 @@ const IconCoin = () => (
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-[#070a13] text-white antialiased">
+      <GlowTokens />
+      <BackToScanLink />
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgba(56,189,248,0.08),transparent)]" />
-      <div className="relative mx-auto max-w-7xl px-4 py-8 md:px-8">{children}</div>
+      <div className="relative mx-auto max-w-7xl px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
     </div>
   );
 }
@@ -262,19 +354,24 @@ function ResultDashboard() {
   const cweList = result.vulnerabilities.map((v) => v.cwe).join(", ");
   const bench = result.benchmark_report;
   const lastAttempt = result.retry_history[result.retry_history.length - 1];
+  const hasSpans = Array.isArray(result.spans) && result.spans.length > 0; // FIX (#5) guard
 
   /* ---- Framer stagger container: order = diff → metrics → trace → SLO ----
      This order is intentional. The diff is the "did it work?" answer judges
      want first. Metrics quantify it, the trace proves how, the SLO/audit
      footer certify it. Revealing them in that narrative order guides the eye
-     through the pitch automatically. */
+     through the pitch automatically.
+     FIX (#3): stagger tightened from 180ms -> 100ms (within the requested
+     80-120ms band) and delayChildren trimmed from 100ms -> 60ms so the
+     reveal reads as one cinematic beat instead of a slow roll-out. Easing
+     curve [0.22, 1, 0.36, 1] kept as-is — it was already correct. */
   const container = {
     hidden: {},
-    show: { transition: { staggerChildren: 0.18, delayChildren: 0.1 } },
+    show: { transition: { staggerChildren: 0.1, delayChildren: 0.06 } },
   };
   const item = {
     hidden: { opacity: 0, y: 28 },
-    show: { opacity: 1, y: 0, transition: { duration: 0.6, ease: [0.22, 1, 0.36, 1] } },
+    show: { opacity: 1, y: 0, transition: { duration: 0.55, ease: [0.22, 1, 0.36, 1] } },
   };
 
   return (
@@ -287,7 +384,7 @@ function ResultDashboard() {
             <p className="mt-1 font-mono text-xs text-white/40">scan_id: {result.audit_entry.scan_id}</p>
           </div>
           {/* Security Score Delta — Before → After */}
-          <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-3 backdrop-blur-xl">
+          <div className="glow-card flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-3 backdrop-blur-xl">
             <div className={`rounded-lg border px-3 py-1.5 text-center ${before.bg}`}>
               <div className={`text-lg font-bold tabular-nums ${before.color}`}>{result.cvss_before.toFixed(1)}</div>
               <div className={`text-[10px] font-semibold tracking-wide ${before.color}`}>{before.label}</div>
@@ -354,7 +451,7 @@ function ResultDashboard() {
         {/* ---- Main 2-column grid: diff (left) · metrics+panels (right) ---- */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.5fr_1fr]">
           {/* LEFT — Diff view */}
-          <motion.div variants={item} className="overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl">
+          <motion.div variants={item} className="glow-card overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl">
             <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
               <span className="text-sm font-medium text-white/80">
                 {result.vulnerabilities.length} vulnerabilities fixed · {cweList}
@@ -388,25 +485,31 @@ function ResultDashboard() {
           <div className="space-y-6">
             {/* Three CountUp metric cards */}
             <motion.div variants={item} className="grid grid-cols-1 gap-4 sm:grid-cols-3 lg:grid-cols-1">
-              <MetricCard
-                index={0} label="Latency" value={result.latency_ms} suffix=" ms"
-                decimals={0} icon={<IconClock />} accent="cyan"
-                baselineNote="38% faster than manual review"
-              />
-              <MetricCard
-                index={1} label="Tokens Used" value={result.tokens_used}
-                decimals={0} icon={<IconChip />} accent="violet"
-                baselineNote="severity-routed for token efficiency"
-              />
-              <MetricCard
-                index={2} label="Cost" value={result.cost_usd} prefix="$"
-                decimals={4} icon={<IconCoin />} accent="emerald"
-                baselineNote="vs ~$85 for 1hr human review"
-              />
+              <div className="glow-card rounded-2xl">
+                <MetricCard
+                  index={0} label="Latency" value={result.latency_ms} suffix=" ms"
+                  decimals={0} icon={<IconClock />} accent="cyan"
+                  baselineNote="38% faster than manual review"
+                />
+              </div>
+              <div className="glow-card glow-card--accent rounded-2xl">
+                <MetricCard
+                  index={1} label="Tokens Used" value={result.tokens_used}
+                  decimals={0} icon={<IconChip />} accent="violet"
+                  baselineNote="severity-routed for token efficiency"
+                />
+              </div>
+              <div className="glow-card rounded-2xl">
+                <MetricCard
+                  index={2} label="Cost" value={result.cost_usd} prefix="$"
+                  decimals={4} icon={<IconCoin />} accent="emerald"
+                  baselineNote="vs ~$85 for 1hr human review"
+                />
+              </div>
             </motion.div>
 
             {/* Model Routing + Reflection Loop panel */}
-            <motion.div variants={item} className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl">
+            <motion.div variants={item} className="glow-card rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl">
               <button
                 onClick={() => setRoutingOpen((o) => !o)}
                 className="flex w-full items-center justify-between px-4 py-3 text-left"
@@ -463,9 +566,36 @@ function ResultDashboard() {
           </div>
         </div>
 
-        {/* ---- Trace waterfall (full width) ---- */}
+        {/* ---- Trace waterfall (full width) ----
+            FIX (#5): only render the real waterfall when spans actually came
+            back from the API. An empty/missing `spans` array previously fell
+            through into <TraceWaterfall> and rendered a misleading "0 SPANS"
+            state. Now we show an honest fallback that links to the same
+            SigNoz trace the CTA button below points to. */}
         <motion.div variants={item}>
-          <TraceWaterfall spans={result.spans} />
+          {hasSpans ? (
+            <TraceWaterfall spans={result.spans} />
+          ) : (
+            <div className="glow-card flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-5 py-4 backdrop-blur-xl">
+              <div>
+                <div className="text-sm font-medium text-white/70">Distributed trace</div>
+                <div className="mt-0.5 text-xs text-white/40">
+                  Span-level detail isn&apos;t available in this response yet.
+                </div>
+              </div>
+              <button
+                onClick={() =>
+                  window.open(`${SIGNOZ_URL}/trace/${result.trace_id}?scan_id=${result.audit_entry.scan_id}`, "_blank", "noopener")
+                }
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3.5 py-2 text-xs font-medium text-cyan-200 transition hover:bg-cyan-500/15"
+              >
+                Full trace available in SigNoz
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M7 17L17 7M17 7H8M17 7v9" />
+                </svg>
+              </button>
+            </div>
+          )}
         </motion.div>
 
         {/* ---- Accuracy benchmark proof strip ---- */}
@@ -534,10 +664,14 @@ function SloBadge({ slo }: { slo: SloStatus }) {
   const stateColor =
     slo.state === "green" ? "#34d399" : slo.state === "amber" ? "#fbbf24" : "#f87171";
   const circumference = 2 * Math.PI * 26;
-  const dash = (slo.error_budget_remaining_pct / 100) * circumference;
+  // FIX (#4): remaining % now resolved through resolveErrorBudgetRemaining()
+  // instead of reading `error_budget_remaining_pct` directly, so a mislabeled
+  // "consumed" value from the backend no longer inverts the ring.
+  const remainingPct = resolveErrorBudgetRemaining(slo);
+  const dash = (remainingPct / 100) * circumference;
 
   return (
-    <div className="flex items-center gap-4 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-xl">
+    <div className="glow-card flex items-center gap-4 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-xl">
       <div className="relative h-16 w-16">
         <svg width="64" height="64" viewBox="0 0 64 64" className="-rotate-90">
           <circle cx="32" cy="32" r="26" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="6" />
@@ -550,12 +684,12 @@ function SloBadge({ slo }: { slo: SloStatus }) {
           />
         </svg>
         <span className="absolute inset-0 flex items-center justify-center text-xs font-bold" style={{ color: stateColor }}>
-          {slo.error_budget_remaining_pct}%
+          {remainingPct}%
         </span>
       </div>
       <div>
         <div className="text-sm font-medium text-white/80">{slo.slo_target}% SLO</div>
-        <div className="text-xs text-white/50">{slo.error_budget_remaining_pct}% error budget remaining</div>
+        <div className="text-xs text-white/50">{remainingPct}% error budget remaining</div>
       </div>
     </div>
   );

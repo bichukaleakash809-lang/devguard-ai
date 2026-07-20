@@ -135,14 +135,16 @@ export default function AgentWorkspace() {
 
   // On success, play the exit animation, THEN navigate. We drive this from an
   // effect (not inline) so it fires exactly once when phase flips to success.
+  // POLISH: the timeout below (600ms) is intentionally kept exactly equal to
+  // the exit transition's duration (0.6s) so navigation never cuts the motion
+  // short — the route change happens on the animation's last frame, not before.
   useEffect(() => {
     if (scan.phase !== "success" || !scan.finalScanId) return;
     setExiting(true);
-    // 600ms matches the exit transition below — navigate as the page finishes
-    // dissolving so the next route mounts into the tail of the motion.
+    const EXIT_DURATION_MS = 600; // must match transition.duration below (0.6s)
     const t = setTimeout(() => {
       router.push(`/result?scan_id=${scan.finalScanId}`);
-    }, 600);
+    }, EXIT_DURATION_MS);
     return () => clearTimeout(t);
   }, [scan.phase, scan.finalScanId, router]);
 
@@ -159,8 +161,11 @@ export default function AgentWorkspace() {
           {!exiting && (
             <motion.div
               key="workspace"
-              // Exit: fade + slight upward drift + scale-down. Ease-out so it
-              // decelerates — reads as the view "pulling back" into the result.
+              // Exit: fade + slight upward drift + scale-down. Ease-out curve
+              // [0.22,1,0.36,1] ("expo-out"-ish) so it decelerates hard at the
+              // end — reads as the view "pulling back" into the result rather
+              // than just linearly fading. Same curve is reused on the CTA's
+              // micro-interactions below for a consistent motion language.
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -24, scale: 0.98 }}
@@ -234,11 +239,25 @@ export default function AgentWorkspace() {
 
                 {/* Action row */}
                 <div className="mt-6 flex flex-col items-center gap-4">
-                  <RunButton
-                    onClick={handleRun}
-                    scanning={isScanning}
-                    disabled={isScanning}
-                  />
+                  {/* POLISH: wrapper is `relative` so the ambient glow div
+                      behind the CTA can sit at z-index 0 while the button
+                      itself (z-10 internally) stays crisp on top. */}
+                  <div className="relative flex items-center justify-center">
+                    {/* Ambient glow: a large blurred, low-opacity circle behind
+                        the button. blur-2xl (~40px) + low opacity reads as
+                        "light bleeding off the button" rather than a hard
+                        halo — the panel-level glow uses a tighter blur since
+                        it's tracing an edge, this one is meant to look diffuse. */}
+                    <div
+                      aria-hidden
+                      className="pointer-events-none absolute h-24 w-56 rounded-full blur-2xl dg-cta-ambient"
+                    />
+                    <RunButton
+                      onClick={handleRun}
+                      scanning={isScanning}
+                      disabled={isScanning}
+                    />
+                  </div>
                   {submitError && (
                     <p className="text-sm text-rose-300/90">{submitError}</p>
                   )}
@@ -303,7 +322,10 @@ function Header({ routing }: { routing: ReturnType<typeof useScanSocket>["routin
         </div>
       </div>
 
-      {/* Model routing indicator — subtle until it has data, then a quiet flex. */}
+      {/* Model routing indicator — subtle until it has data, then a quiet flex.
+          POLISH: routed state now carries dg-badge-glow, a thin outer glow
+          using --glow-accent so it visually matches the CTA/panel glow
+          system instead of being a flat bordered pill. */}
       <AnimatePresence mode="wait">
         {routing ? (
           <motion.div
@@ -311,7 +333,7 @@ function Header({ routing }: { routing: ReturnType<typeof useScanSocket>["routin
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.3, ease: "easeOut" }}
-            className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5"
+            className="dg-badge-glow flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5"
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${
@@ -394,10 +416,19 @@ function RunButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      // whileTap scale-down at 0.12s: fast enough to feel like a physical press.
-      whileTap={{ scale: 0.97 }}
-      transition={{ duration: 0.12, ease: "easeOut" }}
-      className="dg-run-btn group relative inline-flex items-center gap-2.5 rounded-xl px-7 py-3.5 text-sm font-semibold text-white disabled:cursor-not-allowed"
+      // POLISH: full hover → tap → rest cycle, all on the same easing curve
+      // used for page-level motion ([0.22,1,0.36,1]) so the button doesn't
+      // feel like it's animating on a different "system" from the rest of
+      // the page. Hover scale is deliberately small (1.02) — big enough to
+      // register as "responsive" without the button jumping around next to
+      // the editor. Tap goes slightly below rest (0.98) so the press reads
+      // as a physical dip. Both are fast (180ms) since this is a primary CTA
+      // people click repeatedly during a demo — sluggish easing here would
+      // make the whole page feel laggy.
+      whileHover={disabled ? undefined : { scale: 1.02 }}
+      whileTap={disabled ? undefined : { scale: 0.98 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+      className="dg-run-btn group relative z-10 inline-flex items-center gap-2.5 rounded-xl px-7 py-3.5 text-sm font-semibold text-white disabled:cursor-not-allowed"
     >
       {/* Rotating conic shimmer border sits behind the button face. */}
       <span className="dg-run-border" aria-hidden />
@@ -494,6 +525,14 @@ function GlobalStyles() {
       :root {
         --dg-accent: #6366f1; /* electric indigo/violet — the product's signature */
         --dg-accent-2: #22d3ee; /* cyan secondary for scan energy */
+
+        /* POLISH: centralized glow tokens. Everything that should "glow"
+           (panel edge, CTA, badges) pulls from these two variables instead of
+           hard-coding its own rgba glow color. That keeps the whole glow
+           system tunable from one place and visually consistent — same hue
+           family everywhere, just different intensity/blur per element. */
+        --glow-primary: 99, 102, 241; /* indigo, as r,g,b so we can vary alpha per use */
+        --glow-accent: 34, 211, 238; /* cyan, same pattern */
       }
 
       /* Fine engineering grid — reads as "infra tool", not "chatbot". */
@@ -519,7 +558,11 @@ function GlobalStyles() {
       }
 
       /* Glass panel: layered translucency + inset highlight + accent-tinted
-         outer glow. The inset top border sells the "lit glass edge" look. */
+         outer glow. The inset top border sells the "lit glass edge" look.
+         POLISH: box-shadow now stacks THREE layers instead of two — a tight
+         1px glow ring (edge definition), a wide soft glow (the "floating"
+         feel), and the original drop shadow (grounds it against the page).
+         Depth reads better with a near+far glow pair than a single shadow. */
       .dg-panel {
         background: linear-gradient(
           180deg,
@@ -528,7 +571,8 @@ function GlobalStyles() {
         );
         backdrop-filter: blur(14px);
         border: 1px solid rgba(255, 255, 255, 0.08);
-        box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.06),
+        box-shadow: 0 0 0 1px rgba(var(--glow-primary), 0.08),
+          0 0 40px -12px rgba(var(--glow-primary), 0.25),
           0 20px 60px -20px rgba(0, 0, 0, 0.8),
           inset 0 1px 0 rgba(255, 255, 255, 0.06);
       }
@@ -536,6 +580,25 @@ function GlobalStyles() {
       .dg-logo {
         background: linear-gradient(135deg, var(--dg-accent), #8b5cf6);
         box-shadow: 0 0 20px -4px var(--dg-accent);
+      }
+
+      /* POLISH: shared glow for badges (routing pill). Kept intentionally
+         subtle — 0 0 16px at low alpha — since a badge is secondary UI and
+         shouldn't compete with the CTA's glow for attention. */
+      .dg-badge-glow {
+        box-shadow: 0 0 16px -4px rgba(var(--glow-accent), 0.35);
+      }
+
+      /* POLISH: the diffuse ambient glow div sitting behind the CTA button
+         (separate from the button's own conic border/box-shadow). Radial so
+         it fades to nothing at the edges rather than showing a hard blurred
+         rectangle. */
+      .dg-cta-ambient {
+        background: radial-gradient(
+          ellipse at center,
+          rgba(var(--glow-primary), 0.45),
+          transparent 70%
+        );
       }
 
       /* ── Laser scan sweep ──────────────────────────────────────────────
@@ -586,27 +649,31 @@ function GlobalStyles() {
 
       /* ── Run button ─────────────────────────────────────────────────────
          Face + rotating conic border. Idle glow pulses on a slow 3s cycle so
-         it reads as "alive and ready" without nagging for attention. */
+         it reads as "alive and ready" without nagging for attention.
+         POLISH: now driven by --glow-primary instead of a hard-coded rgba,
+         and the hover state (added below) intensifies the same glow rather
+         than introducing a new color — "brighter", not "different". */
       .dg-run-btn {
         background: linear-gradient(180deg, #1a1c2e, #111220);
-        box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3),
-          0 8px 30px -8px rgba(99, 102, 241, 0.5);
+        box-shadow: 0 0 0 1px rgba(var(--glow-primary), 0.3),
+          0 8px 30px -8px rgba(var(--glow-primary), 0.5);
         animation: dg-idle-glow 3s ease-in-out infinite;
         overflow: hidden;
+        transition: box-shadow 0.18s ease-out;
       }
       .dg-run-btn:hover {
-        box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.6),
-          0 10px 40px -6px rgba(99, 102, 241, 0.7);
+        box-shadow: 0 0 0 1px rgba(var(--glow-primary), 0.65),
+          0 10px 44px -6px rgba(var(--glow-primary), 0.8);
       }
       @keyframes dg-idle-glow {
         0%,
         100% {
-          box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3),
-            0 8px 30px -8px rgba(99, 102, 241, 0.4);
+          box-shadow: 0 0 0 1px rgba(var(--glow-primary), 0.3),
+            0 8px 30px -8px rgba(var(--glow-primary), 0.4);
         }
         50% {
-          box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.5),
-            0 8px 38px -6px rgba(99, 102, 241, 0.65);
+          box-shadow: 0 0 0 1px rgba(var(--glow-primary), 0.5),
+            0 8px 38px -6px rgba(var(--glow-primary), 0.65);
         }
       }
       /* Conic shimmer ring rotating behind the face (Aceternity pattern). */

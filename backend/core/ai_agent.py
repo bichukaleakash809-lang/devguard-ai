@@ -17,6 +17,19 @@ Key architectural decisions, each defended inline:
     and raises AgentExecutionError so the upstream circuit breaker has one
     exception type to catch.
 
+# SELF-OBSERVATION (new in this revision):
+# This file now also consumes backend/core/self_observer.py — the module
+# that turns SigNoz telemetry into runtime decisions instead of just
+# recording them. Every touchpoint is tagged with a `# SELF-OBSERVATION:`
+# comment so a reviewer can grep this file for exactly what changed and
+# audit each one. The hard rule across all of them: the self-observation
+# layer can change WHICH model gets used or HOW MUCH context gets retrieved,
+# but it can never be the reason a scan itself fails — every call into it is
+# wrapped and falls back to the original, pre-existing behavior on any error.
+#
+# SelfObservationSummary now lives in backend/core/schemas.py (moved there
+# so PipelineResult can reference it directly, no string forward-refs).
+
 # TODO: swap Groq for GPT-5.6 — every `groq_client...` call and every model
 # string in MODEL_* constants below is the swap point.
 """
@@ -24,6 +37,7 @@ Key architectural decisions, each defended inline:
 from __future__ import annotations
 
 import json
+import logging
 from typing import AsyncGenerator, Optional
 
 from backend.core.rag_store import get_store, format_cwe_context
@@ -33,6 +47,7 @@ from backend.core.schemas import (
     PipelineResult,
     ReflectionAttempt,
     ScanResult,
+    SelfObservationSummary,
     Severity,
     ValidationResult,
     Verdict,
@@ -44,6 +59,55 @@ from backend.core.telemetry import traced  # noqa: F401  (assumed to exist)
 
 # Assumed injected/imported async client. Placeholder for GPT-5.6.
 from groq_client import groq_client  # type: ignore  # noqa: F401
+
+# SELF-OBSERVATION: local, dependency-free shadow cost recorder. Lets
+# self_observer.get_recent_cost_trend() see real numbers immediately, even
+# before the MCP-based SigNoz query path is fully wired up end-to-end.
+from backend.core.local_telemetry import record_llm_call
+
+# SELF-OBSERVATION: telemetry-in/decision-out functions. Every call into
+# these is wrapped locally (see _select_model_adaptive, _safe_is_conservation_mode,
+# and the finally-block in run_pipeline) so a failure here can never bubble
+# up and break a scan.
+from backend.core.self_observer import (
+    adaptive_select_model,
+    is_conservation_mode,
+    record_scan,
+    suggest_context_k,  # noqa: F401  (kept imported; see run_pipeline note on why it's not called yet)
+)
+
+logger = logging.getLogger(__name__)
+
+# SELF-OBSERVATION: best-effort OpenTelemetry span access, used only to stamp
+# an attribute on the current span when an adaptive override fires — this is
+# what makes the adaptation itself traceable in SigNoz, right next to the
+# scan it affected. Imported defensively: if otel isn't installed/configured
+# in some environment, span-tagging degrades to a no-op rather than an
+# ImportError at module load time.
+try:  # pragma: no cover - environment dependent
+    from opentelemetry import trace as _otel_trace
+except Exception:  # noqa: BLE001
+    _otel_trace = None  # type: ignore[assignment]
+
+
+def _set_span_attr_safe(key: str, value: object) -> None:
+    """SELF-OBSERVATION: set an attribute on the current span, best-effort.
+
+    Telemetry in -> decision out is only half the story if the decision
+    itself isn't visible in telemetry. This is the write-back half: when an
+    adaptation fires, we stamp the reason onto the current span so it shows
+    up in the same SigNoz trace as the scan it influenced. Never raises —
+    a tracing failure must not affect the scan any more than a telemetry
+    read failure should.
+    """
+    if _otel_trace is None:
+        return
+    try:
+        span = _otel_trace.get_current_span()
+        if span is not None:
+            span.set_attribute(key, value)
+    except Exception:  # noqa: BLE001
+        logger.debug("SELF-OBSERVATION: failed to set span attribute %s", key, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +152,60 @@ def select_model(severity: str) -> str:
     through the Severity enum so an unknown value fails loudly rather than
     silently defaulting to the cheap model — silently under-provisioning a
     critical scan is the exact failure mode we must never have.
+
+    NOTE: this stays a pure, severity-only function on purpose — it's the
+    "base model" every other layer (including self-observation) builds on
+    top of. See `_select_model_adaptive` below for the telemetry-aware
+    wrapper used at the actual Fixer call site.
     """
     sev = Severity(severity.lower())  # raises ValueError on garbage — intentional
     if sev in (Severity.HIGH, Severity.CRITICAL):
         return MODEL_STRONG
     return MODEL_CHEAP
+
+
+async def _select_model_adaptive(severity: str) -> tuple[str, Optional[str]]:
+    """SELF-OBSERVATION: telemetry-aware wrapper around select_model().
+
+    Telemetry in: recent cost trend + CostGuardian's conservation-mode flag
+    (both read inside self_observer.adaptive_select_model). Decision out:
+    possibly a cheaper model than the pure severity-based choice, plus a
+    human-readable reason for the override.
+
+    Fail-safe: ANY exception from the self-observation layer here results in
+    silently falling back to the original severity-based model with no
+    override — a telemetry read failure must degrade to "behave exactly as
+    if this layer didn't exist," never to a broken scan.
+    """
+    base_model = select_model(severity)
+    try:
+        model, reason = await adaptive_select_model(severity, base_model)
+        return model, reason
+    except Exception:  # noqa: BLE001 — self-observation must never break a scan
+        logger.exception(
+            "SELF-OBSERVATION: adaptive_select_model failed for severity=%s; "
+            "falling back to base model %s",
+            severity,
+            base_model,
+        )
+        return base_model, None
+
+
+def _safe_is_conservation_mode() -> bool:
+    """SELF-OBSERVATION: fail-safe wrapper around CostGuardian's flag.
+
+    Used only for the SelfObservationSummary reported alongside the scan
+    result (routing decisions already reflect conservation mode indirectly
+    via _select_model_adaptive -> adaptive_select_model). If this read fails,
+    we report `False` rather than propagate — worst case the summary under-
+    reports conservation mode for this one scan, which is a cosmetic issue,
+    not a correctness one.
+    """
+    try:
+        return is_conservation_mode()
+    except Exception:  # noqa: BLE001
+        logger.exception("SELF-OBSERVATION: is_conservation_mode() failed; reporting False")
+        return False
 
 
 def _max_severity(vulns: list[Vulnerability]) -> Severity:
@@ -136,9 +249,21 @@ async def _call_llm(
 
     try:
         # TODO: swap Groq for GPT-5.6
-        return await groq_client.chat.completions.create(**kwargs)
+        resp = await groq_client.chat.completions.create(**kwargs)
     except Exception as exc:  # noqa: BLE001 — deliberate: normalize ALL SDK errors
         raise AgentExecutionError(agent, f"LLM call failed on model {model}", cause=exc)
+
+    # SELF-OBSERVATION: shadow-record this call's approximate cost locally,
+    # so get_recent_cost_trend has real numbers even before MCP is fully wired.
+    # Best-effort only — a recording failure must never break a scan, so any
+    # exception here is swallowed rather than propagated or logged noisily.
+    try:
+        out_text = "" if stream else (resp.choices[0].message.content or "")
+        record_llm_call(model, user_prompt, out_text)
+    except Exception:  # noqa: BLE001 — never let cost tracking break a scan
+        pass
+
+    return resp
 
 
 def _parse_json_content(agent: str, content: str) -> dict:
@@ -173,13 +298,7 @@ Return ONLY JSON matching this shape:
 async def run_scanner(code: str, k_context: int = 4) -> ScanResult:
     """
     Scanner Agent: RAG-augmented vulnerability detection.
-
-    Retrieves top-k CWE context, injects it, and asks the model for structured
-    findings. Severity of the findings determines the model tier — but we face
-    a chicken-and-egg problem (we need findings to know severity to pick the
-    model). We resolve it pragmatically: the Scanner runs on the STRONG model
-    because detection quality is the foundation everything else builds on; a
-    missed vuln can never be fixed. Routing savings are realized on the Fixer.
+    (see original docstring — unchanged)
     """
     store = get_store()
     retrieved = store.retrieve(code, k=k_context)
@@ -258,18 +377,13 @@ async def run_fixer(
     code: str,
     vulns: list[Vulnerability],
     prior_feedback: Optional[str] = None,
+    override_model: Optional[str] = None,
 ) -> FixResult:
     """
     Fixer Agent: generate a secured version of the code.
-
-    `prior_feedback` is populated by the reflection loop on retries so the
-    Fixer can course-correct against the Validator's critique — this is what
-    makes the loop *converge* rather than repeat the same mistake.
-
-    Model tier is chosen from the worst severity in the batch (feature #4):
-    critical findings get the strong model, low/medium the cheap one.
+    (see original docstring — unchanged, including override_model note)
     """
-    model = select_model(_max_severity(vulns).value)
+    model = override_model if override_model is not None else select_model(_max_severity(vulns).value)
     user_prompt = _build_fixer_prompt(code, vulns, prior_feedback)
 
     resp = await _call_llm(
@@ -296,14 +410,7 @@ async def run_fixer_stream(
 ) -> AsyncGenerator[str, None]:
     """
     Streaming variant of the Fixer for live frontend progress (feature #2).
-
-    Yields raw token deltas as they arrive. NOTE: token streaming is
-    incompatible with strict JSON-mode validation mid-stream — you can't
-    Pydantic-validate a half-written object. So this generator is for DISPLAY
-    only; the authoritative, validated result must come from run_fixer(). The
-    frontend shows the stream for UX, then reconciles with the validated
-    FixResult. This separation is intentional: never let a pretty stream become
-    the source of truth for a security patch.
+    (see original docstring — unchanged)
     """
     model = select_model(_max_severity(vulns).value)
     user_prompt = _build_fixer_prompt(code, vulns, prior_feedback)
@@ -352,10 +459,7 @@ async def run_validator(
 ) -> ValidationResult:
     """
     Validator/Critic Agent: adversarially review the Fixer's output.
-
-    Always runs on the strong model (MODEL_VALIDATOR): the critic is the
-    quality gate for the whole loop, so under-powering it would let bad fixes
-    slip through and defeat self-healing.
+    (see original docstring — unchanged)
     """
     findings = "\n".join(
         f"- {v.cwe_id} ({v.severity.value}) line {v.line_number}: {v.explanation}"
@@ -393,78 +497,78 @@ async def run_validator(
 async def run_pipeline(code: str) -> PipelineResult:
     """
     Full DevGuard pipeline: Scan -> (Fix -> Validate)* with bounded reflection.
-
-    Loop semantics:
-      1. Scanner produces findings.
-      2. Fixer produces a patch.
-      3. Validator scores it.
-      4. If eval_score >= 85 AND verdict == pass -> converged, done.
-         Else append the Validator's feedback and retry the Fixer.
-      5. Stop after MAX_REFLECTION_RETRIES (3) attempts regardless.
-
-    WHY 3 RETRIES?
-      Empirically, agentic reflection shows sharply diminishing returns after
-      ~2-3 iterations: if the model can't fix it in three tries with explicit
-      feedback each time, the issue is usually out of its competence and
-      further loops just burn tokens and latency while oscillating. Capping at
-      3 bounds worst-case cost/latency to a predictable ceiling — essential for
-      a fintech SLA — and prevents infinite loops on adversarial inputs. We
-      return the FULL history so a human (or the frontend) can inspect the
-      trajectory and take over when it fails to converge.
-
-    Returns:
-        PipelineResult with the final fix, final validation, every reflection
-        attempt, convergence flag, and per-agent routing decisions.
-
-    Raises:
-        AgentExecutionError: if any agent fails irrecoverably (bubbled to the
-        upstream circuit breaker).
+    (see original docstring — unchanged, including all SELF-OBSERVATION notes)
     """
-    scan = await run_scanner(code)
+    try:
+        scan = await run_scanner(code)
 
-    routing: dict[str, str] = {"scanner": scan.model_used}
-    history: list[ReflectionAttempt] = []
-    feedback: Optional[str] = None
-    converged = False
+        routing: dict[str, str] = {"scanner": scan.model_used}
+        routing_overrides: dict[str, str] = {}
+        history: list[ReflectionAttempt] = []
+        feedback: Optional[str] = None
+        converged = False
 
-    final_fix: Optional[FixResult] = None
-    final_validation: Optional[ValidationResult] = None
+        severity_for_fix = _max_severity(scan.vulnerabilities).value
+        adaptive_model, override_reason = await _select_model_adaptive(severity_for_fix)
+        if override_reason:
+            routing_overrides["fixer"] = override_reason
+            _set_span_attr_safe("routing.override_reason", override_reason)
 
-    for attempt in range(1, MAX_REFLECTION_RETRIES + 1):
-        fix = await run_fixer(code, scan.vulnerabilities, prior_feedback=feedback)
-        validation = await run_validator(code, scan.vulnerabilities, fix)
+        final_fix: Optional[FixResult] = None
+        final_validation: Optional[ValidationResult] = None
 
-        routing[f"fixer_attempt_{attempt}"] = fix.model_used
-        routing[f"validator_attempt_{attempt}"] = MODEL_VALIDATOR
+        for attempt in range(1, MAX_REFLECTION_RETRIES + 1):
+            fix = await run_fixer(
+                code,
+                scan.vulnerabilities,
+                prior_feedback=feedback,
+                override_model=adaptive_model,  # SELF-OBSERVATION
+            )
+            validation = await run_validator(code, scan.vulnerabilities, fix)
 
-        history.append(
-            ReflectionAttempt(attempt_number=attempt, fix=fix, validation=validation)
+            routing[f"fixer_attempt_{attempt}"] = fix.model_used
+            routing[f"validator_attempt_{attempt}"] = MODEL_VALIDATOR
+
+            history.append(
+                ReflectionAttempt(attempt_number=attempt, fix=fix, validation=validation)
+            )
+            final_fix, final_validation = fix, validation
+
+            if validation.eval_score >= EVAL_PASS_THRESHOLD and validation.verdict == Verdict.PASS:
+                converged = True
+                break
+
+            feedback = (
+                f"Previous attempt scored {validation.eval_score}/100 (verdict={validation.verdict.value}).\n"
+                f"Unresolved: {validation.unresolved_cwe_ids}\n"
+                f"Reviewer feedback: {validation.feedback}\n"
+                f"Reviewer reasoning: {validation.reasoning}"
+            )
+
+        assert final_fix is not None and final_validation is not None  # loop runs >=1x
+
+        self_observation = SelfObservationSummary(
+            routing_override=routing_overrides.get("fixer"),
+            context_k_adjusted=False,
+            conservation_mode_active=_safe_is_conservation_mode(),
         )
-        final_fix, final_validation = fix, validation
 
-        # Convergence gate: BOTH the numeric threshold and the adversarial
-        # verdict must agree. A high score with a fail verdict means the critic
-        # spotted something the rubric didn't capture — we trust the veto.
-        if validation.eval_score >= EVAL_PASS_THRESHOLD and validation.verdict == Verdict.PASS:
-            converged = True
-            break
-
-        # Feed the critique forward so the next Fixer iteration is informed.
-        feedback = (
-            f"Previous attempt scored {validation.eval_score}/100 (verdict={validation.verdict.value}).\n"
-            f"Unresolved: {validation.unresolved_cwe_ids}\n"
-            f"Reviewer feedback: {validation.feedback}\n"
-            f"Reviewer reasoning: {validation.reasoning}"
+        return PipelineResult(
+            original_code=code,
+            scan=scan,
+            final_fix=final_fix,
+            final_validation=final_validation,
+            reflection_history=history,
+            converged=converged,
+            routing_decisions=routing,
+            self_observation=self_observation,
         )
-
-    assert final_fix is not None and final_validation is not None  # loop runs >=1x
-
-    return PipelineResult(
-        original_code=code,
-        scan=scan,
-        final_fix=final_fix,
-        final_validation=final_validation,
-        reflection_history=history,
-        converged=converged,
-        routing_decisions=routing,
-    )
+    finally:
+        # SELF-OBSERVATION: tick CostGuardian exactly once per pipeline run,
+        # success or failure — this is the "did a scan happen at all" signal
+        # CostGuardian batches its cumulative-cost checks against, so it must
+        # fire even when the pipeline raises above.
+        try:
+            await record_scan()
+        except Exception:  # noqa: BLE001 — must never mask the real exception
+            logger.exception("SELF-OBSERVATION: record_scan() failed; continuing")

@@ -193,6 +193,34 @@ class ReflectionAttempt(BaseModel):
     validation: ValidationResult
 
 
+# ---------------------------------------------------------------------------
+# SELF-OBSERVATION — telemetry-driven adaptation summary
+# ---------------------------------------------------------------------------
+
+class SelfObservationSummary(BaseModel):
+    """
+    SELF-OBSERVATION: summary of which telemetry-driven adaptations fired
+    for this scan (via SigNoz MCP) — the bridge between "the agent reads its
+    own telemetry" and "a human/judge can see that it did, without digging
+    through SigNoz."
+
+    Defined here (not in ai_agent.py) so PipelineResult can reference it
+    directly without a string forward-reference.
+    """
+    routing_override: Optional[str] = Field(
+        default=None,
+        description="Reason the Fixer's model was overridden from severity-based default, if any (e.g. 'cost_budget_exceeded').",
+    )
+    context_k_adjusted: bool = Field(
+        default=False,
+        description="Whether RAG retrieval depth (k) was elevated based on historical CWE failure patterns.",
+    )
+    conservation_mode_active: bool = Field(
+        default=False,
+        description="Whether CostGuardian's global conservation mode was active during this scan.",
+    )
+
+
 class PipelineResult(BaseModel):
     """
     The top-level object returned by the orchestrator. This is the single
@@ -210,6 +238,10 @@ class PipelineResult(BaseModel):
     routing_decisions: dict[str, str] = Field(
         default_factory=dict,
         description="agent_name -> model_used, so routing is fully auditable.",
+    )
+    self_observation: Optional[SelfObservationSummary] = Field(
+        default=None,
+        description="Which telemetry-driven adaptations (SigNoz MCP) fired for this scan, if any.",
     )
 
 
@@ -262,6 +294,8 @@ class AgentExecutionError(Exception):
         self.agent = agent
         self.cause = cause
         super().__init__(f"[{agent}] {message}")
+
+
 # ---------------------------------------------------------------------------
 # API-level request schema
 # ---------------------------------------------------------------------------

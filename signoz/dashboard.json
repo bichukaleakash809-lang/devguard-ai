@@ -1,9 +1,9 @@
 {
   "title": "DevGuard AI — Observability & Resilience",
   "name": "devguard-observability",
-  "description": "SRE dashboard for the DevGuard AI 3-agent pipeline. Panels: request latency (p50/p95/p99 + 3s SLO marker), cost per request, token usage over time, LLM error rate, circuit breaker state changes, and cache hit ratio. Import via Dashboards -> Import JSON. All panels are driven by OTel metrics emitted from backend/core/telemetry.py.",
-  "tags": ["devguard", "llm", "sre", "resilience", "hackathon"],
-  "version": "v4",
+  "description": "SRE dashboard for the DevGuard AI 3-agent pipeline. Panels: request latency (p50/p95/p99 + 3s SLO marker), cost per request, token usage over time, LLM error rate, circuit breaker state changes, cache hit ratio, and self-observation panels (adaptive routing overrides, postmortem triggers, RAG context-k adaptation, cumulative cost vs conservation threshold). Import via Dashboards -> Import JSON. All panels are driven by OTel metrics/spans emitted from backend/core/telemetry.py and backend/core/self_observer.py.",
+  "tags": ["devguard", "llm", "sre", "resilience", "hackathon", "self-observation"],
+  "version": "v5",
   "uploadedGrafana": false,
   "collapsableRowsMigrated": true,
   "variables": {
@@ -31,7 +31,11 @@
     { "i": "panel-tokens",        "x": 0, "y": 8,  "w": 6, "h": 8, "moved": false, "static": false },
     { "i": "panel-error-rate",    "x": 6, "y": 8,  "w": 6, "h": 8, "moved": false, "static": false },
     { "i": "panel-breaker",       "x": 0, "y": 16, "w": 6, "h": 8, "moved": false, "static": false },
-    { "i": "panel-cache-ratio",   "x": 6, "y": 16, "w": 6, "h": 8, "moved": false, "static": false }
+    { "i": "panel-cache-ratio",   "x": 6, "y": 16, "w": 6, "h": 8, "moved": false, "static": false },
+    { "i": "panel-routing-overrides",  "x": 0, "y": 24, "w": 6, "h": 8, "moved": false, "static": false },
+    { "i": "panel-postmortem-triggers","x": 6, "y": 24, "w": 6, "h": 8, "moved": false, "static": false },
+    { "i": "panel-context-k-adaptation","x": 0, "y": 32, "w": 6, "h": 8, "moved": false, "static": false },
+    { "i": "panel-cost-vs-threshold",  "x": 6, "y": 32, "w": 6, "h": 8, "moved": false, "static": false }
   ],
   "widgets": [
     {
@@ -280,6 +284,166 @@
           "queryFormulas": [
             { "queryName": "F1", "expression": "A / (A + B)", "legend": "cache hit ratio", "disabled": false }
           ]
+        },
+        "clickhouse_sql": [{ "name": "A", "query": "", "legend": "", "disabled": false }],
+        "promql": [{ "name": "A", "query": "", "legend": "", "disabled": false }]
+      }
+    },
+    {
+      "id": "panel-routing-overrides",
+      "title": "Adaptive Routing Overrides Over Time",
+      "description": "SELF-OBSERVATION: count of scanner/fixer spans carrying a non-empty `routing.override_reason` attribute (set by self_observer.adaptive_select_model via ai_agent._select_model_adaptive whenever telemetry-driven routing downgraded the model), grouped by reason (e.g. 'cost_budget_exceeded: ...', 'conservation_mode_active'). ASSUMPTION: `routing.override_reason` is a span attribute, not a metric — this queries the trace/span data source and filters on attribute existence. If your SigNoz instance's span-attribute indexing excludes this key, add it to the span attribute allow-list before this panel will populate.",
+      "panelTypes": "graph",
+      "yAxisUnit": "short",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "queryName": "A",
+              "expression": "A",
+              "legend": "{{routing.override_reason}}",
+              "dataSource": "traces",
+              "aggregateOperator": "count",
+              "timeAggregation": "count",
+              "spaceAggregation": "sum",
+              "aggregateAttribute": { "key": "routing.override_reason", "type": "tag", "dataType": "string", "isColumn": false },
+              "filters": {
+                "op": "AND",
+                "items": [
+                  { "key": { "key": "routing.override_reason", "type": "tag", "dataType": "string", "isColumn": false }, "op": "exists", "value": "" }
+                ]
+              },
+              "groupBy": [{ "key": "routing.override_reason", "type": "tag", "dataType": "string", "isColumn": false }],
+              "reduceTo": "sum",
+              "disabled": false,
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [{ "name": "A", "query": "", "legend": "", "disabled": false }],
+        "promql": [{ "name": "A", "query": "", "legend": "", "disabled": false }]
+      }
+    },
+    {
+      "id": "panel-postmortem-triggers",
+      "title": "Postmortem Agent Triggers",
+      "description": "SELF-OBSERVATION: recent `circuit_breaker.postmortem` span events (emitted by self_observer.generate_postmortem when a CircuitBreaker transitions to OPEN), showing `breaker.name` and `postmortem.text`, most recent first. ASSUMPTION: SigNoz's trace query builder in this version indexes span EVENT names/attributes the same way as span attributes (queried here via a synthetic `event.name` tag equal to 'circuit_breaker.postmortem'). If span events aren't separately indexed in your SigNoz deployment, this panel needs either (a) the postmortem also written as top-level span attributes on the breaker's own span (not just an event), or (b) a log line emitted alongside the event and this panel repointed at the Logs data source instead of traces.",
+      "panelTypes": "table",
+      "yAxisUnit": "short",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "queryName": "A",
+              "expression": "A",
+              "legend": "{{breaker.name}}",
+              "dataSource": "traces",
+              "aggregateOperator": "noop",
+              "timeAggregation": "noop",
+              "spaceAggregation": "noop",
+              "aggregateAttribute": { "key": "postmortem.text", "type": "tag", "dataType": "string", "isColumn": false },
+              "filters": {
+                "op": "AND",
+                "items": [
+                  { "key": { "key": "event.name", "type": "tag", "dataType": "string", "isColumn": false }, "op": "=", "value": "circuit_breaker.postmortem" }
+                ]
+              },
+              "groupBy": [
+                { "key": "breaker.name", "type": "tag", "dataType": "string", "isColumn": false },
+                { "key": "postmortem.text", "type": "tag", "dataType": "string", "isColumn": false }
+              ],
+              "reduceTo": "latest",
+              "orderBy": [{ "columnName": "timestamp", "order": "desc" }],
+              "limit": 20,
+              "disabled": false,
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [{ "name": "A", "query": "", "legend": "", "disabled": false }],
+        "promql": [{ "name": "A", "query": "", "legend": "", "disabled": false }]
+      }
+    },
+    {
+      "id": "panel-context-k-adaptation",
+      "title": "RAG Context-K Adaptation Frequency",
+      "description": "SELF-OBSERVATION: count of scanner spans where `rag.context_k_adjusted` is true, i.e. self_observer.suggest_context_k() raised retrieval depth above the baseline (k=4) for a CWE with a high historical validator-failure rate. NEEDS UPSTREAM WORK: as of the current ai_agent.py integration, run_pipeline() does NOT call suggest_context_k() pre-scan (no candidate CWE ids exist before the Scanner runs — see the SELF-OBSERVATION comment above the run_scanner() call in run_pipeline) and no span attribute `rag.context_k_adjusted` is emitted yet. This panel will show a flat zero until (a) a pre-classification pass feeds suggest_context_k() before run_scanner(), and (b) that decision is stamped as a `rag.context_k_adjusted` (bool) span attribute — the attribute name assumed by this panel.",
+      "panelTypes": "graph",
+      "yAxisUnit": "short",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "queryName": "A",
+              "expression": "A",
+              "legend": "context_k raised above baseline",
+              "dataSource": "traces",
+              "aggregateOperator": "count",
+              "timeAggregation": "count",
+              "spaceAggregation": "sum",
+              "aggregateAttribute": { "key": "rag.context_k_adjusted", "type": "tag", "dataType": "bool", "isColumn": false },
+              "filters": {
+                "op": "AND",
+                "items": [
+                  { "key": { "key": "rag.context_k_adjusted", "type": "tag", "dataType": "bool", "isColumn": false }, "op": "=", "value": "true" }
+                ]
+              },
+              "groupBy": [],
+              "reduceTo": "sum",
+              "disabled": false,
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
+        },
+        "clickhouse_sql": [{ "name": "A", "query": "", "legend": "", "disabled": false }],
+        "promql": [{ "name": "A", "query": "", "legend": "", "disabled": false }]
+      }
+    },
+    {
+      "id": "panel-cost-vs-threshold",
+      "title": "Cumulative Cost vs Conservation Threshold",
+      "description": "SELF-OBSERVATION: running sum of LLM spend (query A, per-request cost summed over the window) against a static threshold line at $25.00 — CostGuardian's COST_GUARDIAN_CUMULATIVE_THRESHOLD_USD default from self_observer.py (env-configurable; update this threshold value if that env var is overridden in your deployment). ASSUMPTIONS/GAPS: (1) query A sums the existing devguard_llm_cost_per_request histogram over the selected window as a proxy for 'cumulative cost' — this resets with the dashboard's time range rather than tracking a true session-long running total the way CostGuardian does internally, so treat this as directional, not authoritative. For an exact match to CostGuardian's own view, emit a monotonically increasing counter metric (e.g. `devguard_llm_cost_cumulative_usd_total`) from the backend and repoint query A at it. (2) `devguard.conservation_mode_active` (the boolean CostGuardian.is_conservation_mode() flag) is not currently emitted as a metric at all — recommend backend emit it as an OTel gauge (0/1) on each CostGuardian.record_scan() sample so a future overlay/annotation on this panel can show exactly when conservation mode was engaged, rather than inferring it from the cost line crossing the threshold.",
+      "panelTypes": "graph",
+      "yAxisUnit": "none",
+      "thresholds": [
+        {
+          "index": "conservation-threshold",
+          "keyIndex": 0,
+          "thresholdValue": 25.00,
+          "thresholdUnit": "none",
+          "thresholdColor": "#F5222D",
+          "thresholdLabel": "Conservation mode threshold ($25.00 default, see COST_GUARDIAN_CUMULATIVE_THRESHOLD_USD)",
+          "thresholdOperator": ">",
+          "thresholdFormat": "Text"
+        }
+      ],
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "queryName": "A",
+              "expression": "A",
+              "legend": "cumulative cost (windowed sum, see description)",
+              "dataSource": "metrics",
+              "aggregateOperator": "sum",
+              "timeAggregation": "sum",
+              "spaceAggregation": "sum",
+              "aggregateAttribute": { "key": "devguard_llm_cost_per_request", "type": "Histogram", "dataType": "float64", "isColumn": true },
+              "filters": { "op": "AND", "items": [] },
+              "groupBy": [],
+              "reduceTo": "sum",
+              "disabled": false,
+              "stepInterval": 60
+            }
+          ],
+          "queryFormulas": []
         },
         "clickhouse_sql": [{ "name": "A", "query": "", "legend": "", "disabled": false }],
         "promql": [{ "name": "A", "query": "", "legend": "", "disabled": false }]
