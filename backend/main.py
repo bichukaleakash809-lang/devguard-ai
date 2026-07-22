@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from backend.core import telemetry, cache
 from backend.api.router import router
+from backend.api.god_mode_simulators import god_mode_router
 from fastapi.middleware.cors import CORSMiddleware
 
 @asynccontextmanager
@@ -25,3 +26,4 @@ app.add_middleware(
 
 FastAPIInstrumentor.instrument_app(app)
 app.include_router(router)
+app.include_router(god_mode_router)
