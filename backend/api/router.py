@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from collections import deque
@@ -37,6 +38,7 @@ from pydantic import BaseModel, ValidationError
 
 from backend.core import audit, cache, telemetry
 from backend.core.ai_agent import AgentExecutionError
+from backend.core.mcp_client import get_mcp_client
 from backend.core.resilience import (
     CircuitOpenError,
     circuit_status,
@@ -440,6 +442,31 @@ async def slo_status():
     snap = _slo_snapshot()
     snap["circuit_breaker"] = circuit_status()
     return snap
+
+
+@router.get("/telemetry-status")
+async def telemetry_status():
+    """Honest, machine-readable statement of what observability is actually on.
+
+    Exists so the SigNoz/MCP claim is inspectable at runtime rather than taken
+    on trust from a README. Every field here is read from live configuration or
+    a real object — none of it is asserted.
+    """
+    client = get_mcp_client()
+    return {
+        "otlp": {
+            "endpoint": telemetry.OTLP_ENDPOINT,
+            "sdk_disabled": os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true",
+            "service_name": telemetry.SERVICE_NAME,
+            # Whether spans are being *emitted*. Whether anything is listening
+            # at the other end is a separate question this cannot answer.
+            "exporter_configured": bool(telemetry.OTLP_ENDPOINT),
+        },
+        "signoz_mcp": client.capability_report(),
+        "self_observation_source": (
+            "signoz_mcp" if client.is_configured() else "local_shadow"
+        ),
+    }
 
 
 # ===========================================================================

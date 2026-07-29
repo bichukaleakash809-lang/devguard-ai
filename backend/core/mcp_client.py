@@ -7,21 +7,34 @@ can look at a dashboard. e.g. the Fixer/Router can ask "has this CWE historicall
 caused retries?" or "is our recent error rate elevated?" before choosing a model
 tier or a retry budget.
 
-# TODO: verify against real SigNoz MCP server response shape.
-# SigNoz Foundry ships an MCP server alongside the OTEL collector / query-service
-# in its docker-compose stack, but the exact tool names, request schema, and
-# JSON response shape it exposes over the MCP wire protocol were not available
-# to verify at the time this file was written. This client is built against a
-# clean, mockable interface (`_call_tool`) so that:
-#   1. The rest of the codebase (self_observer.py, routing logic, etc.) can be
-#      written and tested today against stable Pydantic return types.
-#   2. Once the real MCP server's tool names/schemas are confirmed, only
-#      `_call_tool`'s request payload and the three `_parse_*` methods below
-#      need to change — nothing downstream does.
-# If SigNoz's MCP server turns out to speak full JSON-RPC-over-stdio (the
-# common MCP transport) rather than HTTP, swap the transport in `_call_tool`
-# for an MCP SDK ClientSession; the public method signatures below don't need
-# to change either way.
+STATUS: UNVERIFIED ADAPTER — NOT A WORKING SIGNOZ MCP INTEGRATION.
+================================================================
+This is the honest resolution of the question the T0 audit raised (see
+docs/AUDIT.md §3.B and docs/MCP_DECISION.md). Stated plainly so that nobody
+has to read the code to find it out:
+
+  * This client has NEVER completed a round trip against a real SigNoz MCP
+    server. Not once, from any commit in this repository's history.
+  * The transport below is an ASSUMPTION. It POSTs `{"tool", "arguments"}` to
+    an HTTP path. Standard MCP is JSON-RPC 2.0, so this is probably wrong.
+  * The tool names (`query_metrics`, `query_traces`, `query_spans`) and every
+    response field the `_parse_*` methods read are likewise unconfirmed.
+
+What is therefore TRUE about DevGuard's self-observation today: agents consume
+their own telemetry through an in-process shadow (`local_telemetry.py`), behind
+a stable interface with an MCP adapter ready to be wired. That sentence is
+still interesting and it does not overclaim.
+
+The contract's §6.5 offers two branches: prove a real round trip and keep the
+differentiator claim, or state precisely what happens. The second branch was
+taken because the first is impossible in the current environment — every
+container registry and SigNoz Cloud itself are blocked by egress policy, so no
+SigNoz instance can be reached to verify against. Evidence for that blocker is
+in docs/audit-evidence/t2/registry-egress-block.txt.
+
+To finish the first branch later, only two things need to change: `_call_tool`'s
+transport (swap the httpx POST for an MCP SDK ClientSession) and the three
+`_parse_*` methods. Nothing downstream depends on either.
 
 THE ONE RULE THIS FILE EXISTS TO ENFORCE:
     SigNoz/MCP being slow, down, or wrong must NEVER slow down, hang, or fail
@@ -43,15 +56,29 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+class MCPNotConfiguredError(RuntimeError):
+    """Raised when a query is attempted with no SigNoz MCP endpoint configured.
+
+    Deliberately distinct from a transport error: "there is no server" and
+    "the server did not answer" are different facts, and reporting them
+    identically is what allowed an absent integration to be presented as a
+    momentarily-degraded one.
+    """
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
 
-# Default assumes the SigNoz MCP server is exposed on the same docker-compose
-# network as the rest of the observability stack. Override via env var in any
-# environment where that's not true (e.g. staging, or if SigNoz Foundry moves
-# the MCP server to a dedicated port separate from query-service).
-SIGNOZ_MCP_URL = os.environ.get("SIGNOZ_MCP_URL", "http://localhost:8000")
+# NOT CONFIGURED BY DEFAULT — this is deliberate. See the module docstring.
+#
+# This previously defaulted to "http://localhost:8000", which is DevGuard's own
+# backend port under docker-compose. The "SigNoz MCP client" was therefore
+# POSTing an invented request shape to DevGuard itself and getting a 404, then
+# silently falling back — while the README claimed agents were querying SigNoz
+# over MCP. Defaulting to empty makes "not configured" the honest, explicit
+# state instead of a wrong guess that fails quietly.
+SIGNOZ_MCP_URL = os.environ.get("SIGNOZ_MCP_URL", "").strip()
 
 # Aggressive on purpose: this client backs decisions inside the hot path of a
 # scan request. A slow MCP server should degrade to "no data," never to a slow
@@ -163,24 +190,64 @@ class SignozMCPClient:
         if self._http is not None and not self._http.is_closed:
             await self._http.aclose()
 
+    def is_configured(self) -> bool:
+        """True only when a SigNoz MCP endpoint has actually been supplied.
+
+        Callers use this to distinguish "we asked SigNoz and it was down" from
+        "there is no SigNoz to ask" — two states the old code collapsed into
+        one, which is how an unconfigured client ended up reported as live.
+        """
+        return bool(self._base_url)
+
+    def capability_report(self) -> dict[str, Any]:
+        """What this client can currently do, stated plainly.
+
+        This is the honest stand-in for the capability negotiation the contract
+        asks for. A real tool list can only be produced by connecting to a real
+        MCP server and enumerating it; until that has happened, this reports
+        the unverified status rather than a hard-coded list of tool names that
+        nobody has confirmed exist.
+        """
+        return {
+            "configured": self.is_configured(),
+            "endpoint": self._base_url or None,
+            "transport": "http-adapter (UNVERIFIED against a real MCP server)",
+            "verified_against_real_server": False,
+            "tool_list": None,
+            "note": (
+                "The SigNoz MCP wire protocol has never been confirmed from "
+                "this codebase. Real MCP is JSON-RPC 2.0; this adapter assumes "
+                "an HTTP envelope. Treat any success from it as unverified "
+                "until a captured request/response round trip exists in "
+                "docs/audit-evidence/."
+            ),
+        }
+
     async def _call_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Single choke point for talking to the MCP server.
 
-        # TODO: verify against real SigNoz MCP server response shape.
-        # This assumes an HTTP endpoint that accepts an MCP-style
-        # `{"tool": ..., "arguments": ...}` call and returns
-        # `{"result": {...}}` on success. If the real server speaks
-        # JSON-RPC-over-stdio (standard MCP transport) instead, this method
-        # is the only place that needs to change — replace the httpx POST
-        # with an MCP ClientSession `call_tool(...)` invocation and keep the
-        # `dict[str, Any]` return shape the same so `_parse_*` below don't
-        # need touching.
+        UNVERIFIED TRANSPORT. This assumes an HTTP endpoint accepting
+        `{"tool": ..., "arguments": ...}` and returning `{"result": {...}}`.
+        The real SigNoz MCP server has never been reached from this codebase,
+        so that shape is an assumption, not a contract. Standard MCP is
+        JSON-RPC 2.0 — if the live server speaks that, this method is the only
+        place that changes: swap the httpx POST for an MCP ClientSession
+        `call_tool(...)` and keep the `dict[str, Any]` return shape so the
+        `_parse_*` methods below are untouched.
 
-        Raises on any failure — callers (the public methods below) are
-        responsible for catching and converting to an "unavailable" result.
-        This method itself stays exception-transparent so it's easy to unit
-        test against a mock transport.
+        When no endpoint is configured this raises immediately without
+        performing any network I/O. That matters: the old default pointed at
+        DevGuard's own port, so an unconfigured client issued a real HTTP
+        request to itself, got a 404, and fell back — producing a fallback that
+        looked like a transient outage rather than an absent integration.
+
+        Raises on any failure — callers convert to an "unavailable" result.
         """
+        if not self.is_configured():
+            raise MCPNotConfiguredError(
+                "SIGNOZ_MCP_URL is not set — no SigNoz MCP server to query. "
+                "This is the expected state until the integration is verified."
+            )
         client = await self._client()
         response = await client.post(
             "/mcp/tools/call",
@@ -217,10 +284,17 @@ class SignozMCPClient:
                 },
             )
             return self._parse_cost_trend(raw, minutes)
-        except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as exc:
+        except (
+            MCPNotConfiguredError,
+            httpx.HTTPError,
+            httpx.TimeoutException,
+            ValueError,
+            KeyError,
+        ) as exc:
             logger.info(
                 "SignozMCPClient.get_recent_cost_trend: SigNoz/MCP unavailable "
-                "(%s); falling back to local in-process cost telemetry.",
+                "(%s); falling back to local in-process cost telemetry. "
+                "Result is labelled source='local_shadow', never 'live'.",
                 exc,
             )
             local = get_recent_cost_trend_local(minutes)
@@ -272,7 +346,13 @@ class SignozMCPClient:
                 },
             )
             return self._parse_error_rate(raw, minutes)
-        except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as exc:
+        except (
+            MCPNotConfiguredError,
+            httpx.HTTPError,
+            httpx.TimeoutException,
+            ValueError,
+            KeyError,
+        ) as exc:
             logger.warning(
                 "SignozMCPClient.get_error_rate_detailed: SigNoz/MCP "
                 "unavailable or returned an unparseable response (%s). "
@@ -308,7 +388,13 @@ class SignozMCPClient:
                 },
             )
             return self._parse_cwe_pattern(raw, cwe_id)
-        except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as exc:
+        except (
+            MCPNotConfiguredError,
+            httpx.HTTPError,
+            httpx.TimeoutException,
+            ValueError,
+            KeyError,
+        ) as exc:
             logger.warning(
                 "SignozMCPClient.get_cwe_failure_pattern(%s): SigNoz/MCP "
                 "unavailable or returned an unparseable response (%s). "

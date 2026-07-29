@@ -1,0 +1,37 @@
+SigNoz T2 blocker — container registry egress policy
+Captured: 2026-07-29T15:17:34Z
+
+Docker daemon: STARTED SUCCESSFULLY this session (was not running).
+   Server Version: 29.3.1
+   Storage Driver: overlayfs
+
+docker pull attempts — every registry refused by the egress gateway:
+  docker.io          -> BLOCKED (production.cloudfront.docker.com)
+  ghcr.io            -> BLOCKED (pkg-containers.githubusercontent.com)
+  quay.io            -> BLOCKED
+  public.ecr.aws     -> BLOCKED (d2glxqk2uabbnd.cloudfront.net)
+  registry.k8s.io    -> BLOCKED
+
+Proxy status endpoint, recentRelayFailures:
+  production.cloudfront.docker.com:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+  pkg-containers.githubusercontent.com:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+  quay.io:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+  d2glxqk2uabbnd.cloudfront.net:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+  registry.k8s.io:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+  ingest.us.signoz.cloud:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+  signoz.io:443
+    kind=connect_rejected detail=gateway answered 403 to CONNECT (policy denial or upstream failure)
+
+SigNoz Cloud reachability:
+  ingest.us.signoz.cloud -> 000 (000 = no connection)
+  signoz.io              -> 000
+
+CONCLUSION: §6.1 (stand up SigNoz), §6.3 (trace in SigNoz UI) and §6.6
+(dashboard import verified) cannot be executed here. Blocked solely by the
+registry egress policy — not by Docker, resources, or code.

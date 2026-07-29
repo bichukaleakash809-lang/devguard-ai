@@ -1,0 +1,7 @@
+is_configured(): False
+raised MCPNotConfiguredError before any I/O: SIGNOZ_MCP_URL is not set — no SigNoz MCP server to que ...
+get_recent_cost_trend -> available=True source=local_shadow
+SignozMCPClient.get_error_rate_detailed: SigNoz/MCP unavailable or returned an unparseable response (SIGNOZ_MCP_URL is not set — no SigNoz MCP server to query. This is the expected state until the integration is verified.). Returning unavailable result.
+get_error_rate_detailed -> available=False
+SignozMCPClient.get_cwe_failure_pattern(CWE-89): SigNoz/MCP unavailable or returned an unparseable response (SIGNOZ_MCP_URL is not set — no SigNoz MCP server to query. This is the expected state until the integration is verified.). Returning unavailable result.
+get_cwe_failure_pattern -> available=False

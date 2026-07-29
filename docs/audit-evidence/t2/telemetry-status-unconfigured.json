@@ -1,0 +1,17 @@
+{
+    "otlp": {
+        "endpoint": "http://localhost:4317",
+        "sdk_disabled": true,
+        "service_name": "devguard-ai",
+        "exporter_configured": true
+    },
+    "signoz_mcp": {
+        "configured": false,
+        "endpoint": null,
+        "transport": "http-adapter (UNVERIFIED against a real MCP server)",
+        "verified_against_real_server": false,
+        "tool_list": null,
+        "note": "The SigNoz MCP wire protocol has never been confirmed from this codebase. Real MCP is JSON-RPC 2.0; this adapter assumes an HTTP envelope. Treat any success from it as unverified until a captured request/response round trip exists in docs/audit-evidence/."
+    },
+    "self_observation_source": "local_shadow"
+}
