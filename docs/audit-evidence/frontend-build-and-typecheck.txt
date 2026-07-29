@@ -1,0 +1,41 @@
+app/nexus/page.tsx(266,15): error TS2322: Type 'Record<string, unknown> | null' is not assignable to type 'Partial<OmniHealData> | undefined'.
+  Type 'null' is not assignable to type 'Partial<OmniHealData> | undefined'.
+app/nexus/page.tsx(275,15): error TS2322: Type 'Record<string, unknown> | null' is not assignable to type 'Partial<FinOpsData> | undefined'.
+  Type 'null' is not assignable to type 'Partial<FinOpsData> | undefined'.
+app/nexus/page.tsx(284,15): error TS2322: Type 'Record<string, unknown> | null' is not assignable to type 'Partial<PreCogData> | undefined'.
+  Type 'null' is not assignable to type 'Partial<PreCogData> | undefined'.
+app/nexus/page.tsx(293,15): error TS2322: Type 'Record<string, unknown> | null' is not assignable to type 'Partial<LLMJudgeData> | undefined'.
+  Type 'null' is not assignable to type 'Partial<LLMJudgeData> | undefined'.
+app/nexus/page.tsx(302,15): error TS2322: Type 'Record<string, unknown> | null' is not assignable to type 'Partial<ExecutiveCommanderData> | undefined'.
+  Type 'null' is not assignable to type 'Partial<ExecutiveCommanderData> | undefined'.
+=== TSC EXIT: 0 ===
+###### NEXT BUILD ######
+
+> devguard-ai-frontend@1.0.0 build
+> next build
+
+Attention: Next.js now collects completely anonymous telemetry regarding usage.
+This information is used to shape Next.js' roadmap and prioritize features.
+You can learn more, including how to opt-out if you'd not like to participate in this anonymous program, by visiting the following URL:
+https://nextjs.org/telemetry
+
+  ▲ Next.js 14.2.35
+  - Environments: .env.local
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+Failed to compile.
+
+./app/nexus/page.tsx:266:15
+Type error: Type 'Record<string, unknown> | null' is not assignable to type 'Partial<OmniHealData> | undefined'.
+  Type 'null' is not assignable to type 'Partial<OmniHealData> | undefined'.
+
+[0m [90m 264 |[39m               mod[33m=[39m{[33mMODULES[39m[[35m0[39m]}[0m
+[0m [90m 265 |[39m               result[33m=[39m{results[33m.[39momniHeal}[0m
+[0m[31m[1m>[22m[39m[90m 266 |[39m               data[33m=[39m{results[33m.[39momniHeal[33m.[39mdata}[0m
+[0m [90m     |[39m               [31m[1m^[22m[39m[0m
+[0m [90m 267 |[39m               status[33m=[39m{results[33m.[39momniHeal[33m.[39mstatus}[0m
+[0m [90m 268 |[39m               error[33m=[39m{results[33m.[39momniHeal[33m.[39merror}[0m
+[0m [90m 269 |[39m               elapsedMs[33m=[39m{results[33m.[39momniHeal[33m.[39melapsedMs}[0m
+Next.js build worker exited with code: 1 and signal: null

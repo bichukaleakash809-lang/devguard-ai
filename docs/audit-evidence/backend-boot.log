@@ -1,0 +1,19 @@
+/tmp/claude-0/-home-user-devguard-ai/85f1cfaa-c9ab-5688-aaf9-82fe91ede3f5/scratchpad/venv/lib/python3.11/site-packages/pydantic/_internal/_fields.py:149: UserWarning: Field "model_used" has conflict with protected namespace "model_".
+
+You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ()`.
+  warnings.warn(
+INFO:     Started server process [18691]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8099 (Press CTRL+C to quit)
+INFO:     127.0.0.1:33262 - "GET /slo-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40140 - "GET /slo-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40144 - "GET /audit-log/verify HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40156 - "POST /god-mode/simulate/cost-spike HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40160 - "POST /god-mode/simulate/error HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38990 - "GET /slo-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39002 - "GET /audit-log/verify HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39004 - "POST /god-mode/simulate/cost-spike HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39008 - "POST /god-mode/simulate/error HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39016 - "POST /god-mode/simulate/memory-leak HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39024 - "POST /god-mode/simulate/god-mode HTTP/1.1" 200 OK

@@ -1,0 +1,1 @@
+{"slo_target":99.5,"latency_objective_s":3.0,"window_size":100,"samples":0,"current_compliance_pct":100.0,"error_budget_remaining":100.0,"circuit_breaker":{"name":"groq_primary","state":"closed","fail_count":0,"fail_max":5,"reset_timeout_s":30.0}}
