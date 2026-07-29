@@ -1,0 +1,8 @@
+T2 phase 3 — fail-safe test suite (contract §6.7)
+Captured: 2026-07-29T15:33:10Z
+Collector endpoint during tests: http://127.0.0.1:9 (discard port — always refused)
+GROQ_API_KEY: unset.  SIGNOZ_MCP_URL: unset.
+
+tests/test_telemetry_failsafe.py ...............                         [100%]
+tests/test_telemetry_failsafe.py::test_slo_status_works_with_collector_unreachable
+======================== 15 passed, 1 warning in 14.75s ========================

@@ -18,3 +18,7 @@ opentelemetry-instrumentation-logging==0.41b0
 aiohttp==3.9.1
 websockets==12.0
 httpx==0.25.2
+
+# --- test-only (not needed to run DevGuard) ----------------------------------
+pytest==8.4.2
+anyio==3.7.1

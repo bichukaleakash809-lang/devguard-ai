@@ -73,6 +73,7 @@ import functools
 import hashlib
 import inspect
 import logging
+import threading
 import os
 import time
 from contextlib import contextmanager
@@ -110,6 +111,16 @@ DEPLOY_ENV = os.getenv("DEPLOY_ENV", "production")
 # SigNoz endpoint. In SigNoz Cloud you pass an access token as an OTLP header.
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 SIGNOZ_ACCESS_TOKEN = os.getenv("SIGNOZ_ACCESS_TOKEN", "")
+
+# Hard cap on any single OTLP export attempt, and on shutdown flushing.
+#
+# FAIL-SAFE (contract §6.7): without this the gRPC exporters use their default
+# retry/backoff, and `shutdown()` against an unreachable collector blocks
+# indefinitely — a dead SigNoz would hang process shutdown forever. Found by
+# tests/test_telemetry_failsafe.py, which hung on TestClient teardown before
+# this existed.
+OTLP_TIMEOUT_SECONDS = int(os.getenv("OTEL_EXPORTER_OTLP_TIMEOUT", "5"))
+SHUTDOWN_GRACE_SECONDS = float(os.getenv("DEVGUARD_TELEMETRY_SHUTDOWN_GRACE", "6"))
 
 # Metric export cadence. 15s is a good balance: fine enough to catch a fast-moving
 # incident on a dashboard, coarse enough to not hammer the collector.
@@ -200,8 +211,13 @@ def _init_logging_bridge(resource: Resource) -> None:
     """
     global _logger_provider
 
-    logger_provider = LoggerProvider(resource=resource)
+    # shutdown_on_exit=False: the SDK otherwise registers its own atexit hook
+    # which calls shutdown() UNBOUNDED. Against an unreachable collector that
+    # hook blocks forever joining the exporter thread, hanging process exit
+    # even though shutdown_telemetry() is itself bounded. We own shutdown.
+    logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
     log_exporter = OTLPLogExporter(
+        timeout=OTLP_TIMEOUT_SECONDS,
         endpoint=OTLP_ENDPOINT,
         headers=_otlp_headers(),
         insecure=OTLP_ENDPOINT.startswith("http://"),
@@ -244,8 +260,9 @@ def init_telemetry() -> None:
     )
 
     # ---- Tracing ----
-    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider = TracerProvider(resource=resource, shutdown_on_exit=False)
     span_exporter = OTLPSpanExporter(
+        timeout=OTLP_TIMEOUT_SECONDS,
         endpoint=OTLP_ENDPOINT,
         headers=_otlp_headers(),
         # insecure=True for local collectors without TLS; SigNoz Cloud uses TLS.
@@ -261,6 +278,7 @@ def init_telemetry() -> None:
 
     # ---- Metrics ----
     metric_exporter = OTLPMetricExporter(
+        timeout=OTLP_TIMEOUT_SECONDS,
         endpoint=OTLP_ENDPOINT,
         headers=_otlp_headers(),
         insecure=OTLP_ENDPOINT.startswith("http://"),
@@ -268,7 +286,7 @@ def init_telemetry() -> None:
     reader = PeriodicExportingMetricReader(
         metric_exporter, export_interval_millis=METRIC_EXPORT_INTERVAL_MS
     )
-    meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
+    meter_provider = MeterProvider(resource=resource, metric_readers=[reader], shutdown_on_exit=False)
     metrics.set_meter_provider(meter_provider)
     _meter = metrics.get_meter(SERVICE_NAME, SERVICE_VERSION)
 
@@ -370,17 +388,45 @@ def get_tracer() -> trace.Tracer:
 
 def shutdown_telemetry() -> None:
     """Flush buffered spans/metrics/logs on graceful shutdown so we don't lose the
-    last few seconds of an incident right when we need them most."""
+    last few seconds of an incident right when we need them most.
+
+    FAIL-SAFE (contract §6.7): flushing is best-effort and STRICTLY BOUNDED.
+    Each provider is shut down on a daemon thread and joined with a timeout, so
+    an unreachable collector can delay shutdown by at most
+    SHUTDOWN_GRACE_SECONDS and can never hang the process. Losing the last few
+    buffered spans is an acceptable cost; a container that will not exit is not.
+    """
+    def _bounded(name: str, fn: Callable[[], Any]) -> None:
+        t = threading.Thread(target=_swallow(name, fn), name=f"otel-shutdown-{name}", daemon=True)
+        t.start()
+        t.join(SHUTDOWN_GRACE_SECONDS)
+        if t.is_alive():
+            logger.warning(
+                "telemetry shutdown: %s did not flush within %.1fs "
+                "(collector unreachable?) — abandoning the flush and continuing. "
+                "Buffered telemetry for this process is lost; nothing else is affected.",
+                name,
+                SHUTDOWN_GRACE_SECONDS,
+            )
+
+    def _swallow(name: str, fn: Callable[[], Any]) -> Callable[[], None]:
+        def _run() -> None:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 — shutdown must never raise
+                logger.warning("telemetry shutdown: %s raised; ignoring.", name, exc_info=True)
+        return _run
+
     tp = trace.get_tracer_provider()
     if hasattr(tp, "shutdown"):
-        tp.shutdown()
+        _bounded("traces", tp.shutdown)
     mp = metrics.get_meter_provider()
     if hasattr(mp, "shutdown"):
-        mp.shutdown()
-    # GOD-TIER ADDITION: flush the log pipeline too, or the final few
-    # `logger.exception(...)` calls from a crashing shutdown never reach SigNoz.
+        _bounded("metrics", mp.shutdown)
+    # Flush the log pipeline too, or the final few `logger.exception(...)`
+    # calls from a crashing shutdown never reach the collector.
     if _logger_provider is not None and hasattr(_logger_provider, "shutdown"):
-        _logger_provider.shutdown()
+        _bounded("logs", _logger_provider.shutdown)
 
 
 # ---------------------------------------------------------------------------
