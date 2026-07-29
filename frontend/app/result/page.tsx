@@ -261,6 +261,13 @@ function ResultDashboard() {
   const [phase, setPhase] = useState<"loading" | "processing" | "ready" | "notfound" | "error">("loading");
   const [routingOpen, setRoutingOpen] = useState(true); // open by default — it's a wow moment, don't hide it
   const [approvalState, setApprovalState] = useState<"idle" | "approving" | "rejecting">("idle");
+  // Contract §4.5: an error state must name what failed. Discarding the reason
+  // and rendering a generic message leaves a user with nothing to act on.
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  // A failed approve/reject used to roll back silently — the user saw the
+  // button settle back with no indication their decision had not been applied,
+  // on the one control that gates a human-in-the-loop security decision.
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   /* ---- data fetch, with WebSocket fallback for in-flight pipelines ------- */
   const fetchResult = useCallback(async () => {
@@ -275,6 +282,7 @@ function ResultDashboard() {
         return;
       }
       if (!res.ok) {
+        setErrorDetail(`The backend responded with HTTP ${res.status} when fetching this scan.`);
         setPhase("error");
         return;
       }
@@ -289,7 +297,12 @@ function ResultDashboard() {
       } else {
         setPhase("ready");
       }
-    } catch {
+    } catch (err) {
+      setErrorDetail(
+        err instanceof Error
+          ? `Could not reach the backend at ${API} — ${err.message}`
+          : `Could not reach the backend at ${API}.`
+      );
       setPhase("error");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -326,14 +339,22 @@ function ResultDashboard() {
     async (decision: "approve" | "reject") => {
       if (!scanId || !result) return;
       const prev = result;
+      setApprovalError(null);
       setApprovalState(decision === "approve" ? "approving" : "rejecting");
       // Optimistic: flip status immediately so the panel resolves without lag.
       setResult({ ...result, status: "complete" });
       try {
         const res = await fetch(`${API}/scan/${scanId}/${decision}`, { method: "POST" });
-        if (!res.ok) throw new Error("decision failed");
-      } catch {
+        if (!res.ok) throw new Error(`the backend responded with HTTP ${res.status}`);
+      } catch (err) {
         setResult(prev); // rollback on failure
+        // ...and SAY so. A silent rollback on the approval gate means the user
+        // believes a decision was recorded when it was not.
+        setApprovalError(
+          `Your ${decision} was not recorded — ${
+            err instanceof Error ? err.message : "the request failed"
+          }. The scan is unchanged; try again.`
+        );
       } finally {
         setApprovalState("idle");
       }
@@ -347,7 +368,15 @@ function ResultDashboard() {
   if (phase === "notfound")
     return <ErrorState title="Scan not found" detail="This scan ID doesn't exist or has expired. Start a fresh scan to continue." />;
   if (phase === "error" || !result)
-    return <ErrorState title="Something went wrong" detail="We couldn't reach the analysis backend. Check your connection and retry." />;
+    return (
+      <ErrorState
+        title="Something went wrong"
+        detail={
+          errorDetail ??
+          "We couldn't reach the analysis backend. Check your connection and retry."
+        }
+      />
+    );
 
   const before = cvssBand(result.cvss_before);
   const after = cvssBand(result.cvss_after);
@@ -442,6 +471,20 @@ function ResultDashboard() {
                       {approvalState === "rejecting" ? "Rejecting…" : "Reject"}
                     </button>
                   </div>
+
+                  {approvalError && (
+                    <div
+                      role="alert"
+                      className="mt-4 rounded-lg border border-rose-400/30 bg-rose-500/10 px-4 py-3"
+                    >
+                      <p className="text-sm font-medium text-rose-200">
+                        Decision not recorded
+                      </p>
+                      <p className="mt-1 text-xs leading-relaxed text-rose-100/75">
+                        {approvalError}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             </motion.div>
