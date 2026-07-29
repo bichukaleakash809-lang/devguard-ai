@@ -116,7 +116,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Tests: 58 passing**, all with no API key, no collector, no network.
+**Test inventory — 70 passing**, all with no API key, no collector, no network:
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
   bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
   length, no raw dicts across boundaries, empty code rejected before any LLM call
@@ -128,7 +128,8 @@ false-negative risk is real and stated.
   HALF_OPEN → CLOSED, including that an OPEN breaker does not invoke the
   callable at all, and that a ValueError from our own code does not consume the
   outage budget
-- `test_telemetry_failsafe.py` (15) — from T2 phase 3
+- `test_telemetry_failsafe.py` (15) — T2 §6.7, plus the shutdown-hang defect
+- `test_prompt_injection_boundary.py` (12) — the untrusted-content boundary
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.

@@ -35,6 +35,15 @@ Only `main`. There are no released versions and no backported fixes.
   `live`, `local_shadow`, `synthetic` or `partial`, and the UI renders it. An
   in-process estimate is never presented as retrieved telemetry.
 
+## What is regression-protected
+
+70 tests run on every push in CI, with no API key, no collector and no network
+(`.github/workflows/ci.yml`). They cover the typed agent boundaries, the audit
+chain's tamper detection, the circuit-breaker state machine, telemetry
+fail-safety, and the untrusted-content boundary above. CI also runs a real OTLP
+export verification and the secret scan. So the properties claimed in this file
+are checked mechanically rather than asserted once.
+
 ## Known weaknesses — not yet fixed
 
 These are real and should be treated as open:
@@ -62,9 +71,9 @@ These are real and should be treated as open:
   prompt-level defence does. The residual risk is a false negative — an attacker
   talking the Scanner out of reporting a finding — and it is not eliminated.
   A determined attacker with knowledge of the prompt may still succeed.
-- **Docker images do not build**, so the non-root user and the reduced attack
-  surface described in `backend/Dockerfile` are not actually in effect anywhere.
-- **No test suite and no CI**, so none of the above is regression-protected.
+- **Docker images do not build**, so the non-root user and reduced attack surface
+  described in `backend/Dockerfile` are not in effect anywhere. Blocked on
+  container-registry access; see `docs/audit-evidence/t2/registry-egress-block.txt`.
 
 ## Dependencies
 
@@ -73,5 +82,8 @@ Pinned in `requirements.txt` and `frontend/package-lock.json`. `chromadb` and
 CUDA); both are optional accelerators behind `try/except` in
 `backend/core/rag_store.py`, and removing them is under consideration.
 
-There is no automated dependency or secret scanning in CI yet, because there is
-no CI yet.
+**Secret scanning runs in CI** on every push (`.github/workflows/ci.yml`): the
+full git history is scanned for `gsk_*`, `sk-*`, `AKIA*` and PEM private-key
+patterns, and the job fails if `.env` or `frontend/.env.local` is ever tracked
+again. There is **no automated dependency-vulnerability scanning** yet
+(Dependabot / `pip-audit` / `npm audit` in CI) — that remains open.

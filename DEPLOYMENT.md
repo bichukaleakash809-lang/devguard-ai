@@ -1,6 +1,21 @@
 # DevGuard AI — Deployment Guide
 
-This guide gets DevGuard from a repo to a **live, publicly reachable, judge-clickable** deployment. It also includes a **fully local one-command fallback** in case live infra hiccups during judging — always have both ready.
+> **⚠ STATUS: the container path in this guide is NOT currently working.**
+> `backend/Dockerfile` copies `requirements.txt` from outside its build context
+> and there is no `frontend/Dockerfile`, so **`docker compose up` fails** — the
+> images have never built successfully. Every step below that depends on
+> `docker compose` or on the backend image is therefore **unverified**.
+>
+> Fixing it requires pulling base images, which is blocked in the environment
+> where this was audited (evidence:
+> `docs/audit-evidence/t2/registry-egress-block.txt`). Tracked in
+> `docs/HANDOFF.md` as findings B1, B2 and A1.
+>
+> **What does work today, and is verified:** running the backend and frontend
+> directly — see the README Quickstart, or `make backend` / `make frontend`.
+> Run `make doctor` first; it reports exactly what is missing.
+
+This guide describes the intended deployment topology. Read the status note above first: the container-based paths are written but unverified, so treat them as a plan rather than a tested procedure.
 
 ---
 
@@ -54,7 +69,7 @@ Then set `OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4317`.
 
 ## 3. Backend — Railway (or Render)
 
-The repo ships a production [`backend/Dockerfile`](./backend/Dockerfile).
+The repo ships a [`backend/Dockerfile`](./backend/Dockerfile). **It does not build as committed** — its `COPY requirements.txt` reads from outside the `./backend` build context, and its `CMD` targets `main:app` rather than `backend.main:app`. Fix both before relying on any step below.
 
 ### Railway
 1. https://railway.app → **New Project → Deploy from GitHub repo**.
@@ -123,5 +138,5 @@ To skip local SigNoz (lighter): `docker compose up frontend backend redis`.
 - [ ] `curl $NEXT_PUBLIC_API_URL/audit-log/verify` returns `chain_verified: true`
 - [ ] A test scan completes end-to-end on the deployed URL
 - [ ] A trace appears in SigNoz for that scan
-- [ ] Local `docker compose up` also works (fallback verified)
+- [ ] Local `docker compose up` also works (**currently FAILS — see status note**)
 - [ ] Demo video uploaded and linked in README

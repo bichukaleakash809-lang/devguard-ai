@@ -118,9 +118,16 @@ Stated plainly, because a claim a judge can disprove costs more than the feature
 - **SigNoz has never been verified end to end.** Traces, the dashboard and the log↔trace bridge are implemented but unproven against a running instance. No screenshot of a real DevGuard trace exists yet.
 - **The MCP self-observation path is unverified.** `mcp_client.py` targets an assumed HTTP transport; real MCP is JSON-RPC. Its default URL is not a SigNoz address. Treat the "agents query their own telemetry via MCP" idea as designed-and-stubbed, not demonstrated.
 - **The Nexus god-mode endpoints run synthetically when called with an empty body**, which is what the UI currently sends. Panels badge every response with its real provenance (`LIVE` / `LOCAL` / `SIMULATED` / `PARTIAL`), so what you see is labelled honestly — but most of it is currently `SIMULATED`.
-- **No test suite and no CI yet.**
-- **Docker images do not build.** `backend/Dockerfile` copies files from outside its build context and there is no `frontend/Dockerfile`. Run the backend and frontend directly for now.
+- **The Docker path does not work yet** — `backend/Dockerfile` copies files from
+  outside its build context and there is no `frontend/Dockerfile`. Run the
+  backend and frontend directly (see Quickstart). Fixing this needs container
+  registry access, which is currently blocked; evidence in
+  `docs/audit-evidence/t2/registry-egress-block.txt`.
 - **The benchmark harness has never been run to an artifact**, so no accuracy figures are published anywhere.
+- **Test coverage is real but partial.** 70 tests run in CI on every push
+  (contracts, audit chain, circuit breaker, telemetry fail-safety, injection
+  boundary). The agent pipeline's own end-to-end path is **not** covered,
+  because it needs a live LLM key — no live scan has been executed or verified.
 - **No `LICENSE` file yet.** One must be added before this is distributed.
 
 ## License
