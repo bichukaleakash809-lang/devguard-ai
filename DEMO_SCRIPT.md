@@ -7,12 +7,18 @@
 - Have TWO code snippets ready to paste: (1) a `critical` SQLi snippet, (2) a `low/medium` MD5 snippet — the contrast is the whole point of the wow moment
 - Set `COST_BUDGET_USD_PER_30MIN` low enough beforehand that the second scan visibly triggers an override (or just run a few scans before recording to naturally cross the threshold)
 
+> **⚠ This script is not currently recordable as written.** It was authored before the T0 audit and
+> several beats reference behaviour that has not been verified: SigNoz has never been confirmed
+> working end to end, the MCP round trip is unproven, and the benchmark has never produced an
+> artifact. Beats that depend on those are marked inline. Re-validate every claim against
+> `docs/AUDIT.md` before recording.
+
 ---
 
 ## 0:00 – 0:15 | The Hook (cost/problem framing)
 
 **Say:**
-> "Manual security code review costs about $85 an hour and doesn't scale with how fast teams ship. DevGuard AI does it in seconds — and unlike a typical AI wrapper, it proves its own work, and it watches its own telemetry to decide how to spend its budget. Let me show you."
+> "Manual security code review doesn't scale with how fast teams ship. DevGuard AI does it in seconds — and unlike a typical AI wrapper, it proves its own work, and it watches its own telemetry to decide how to spend its budget. Let me show you."
 
 **Show:** DevGuard AI Page 1, clean and idle.
 
@@ -40,9 +46,12 @@
 **Do:** Click "New scan," paste the MD5/weak-hash snippet, run it.
 
 **Say (on Page 2, pointing at the self-observation panel/routing override):**
-> "This one is medium severity — and here, the agent checked its own recent spend through SigNoz's MCP server, saw it was over budget, and downgraded the model itself. That decision — 'cost_budget_exceeded' — isn't something I coded as a fixed rule for this snippet. It's the agent reading its own telemetry and deciding, live, in the same request. This is the differentiator: DevGuard doesn't just get observed — it observes itself, and adapts."
+> "This one is medium severity — and here, the agent checked its own recent spend, saw it was over budget, and downgraded the model itself. That decision — 'cost_budget_exceeded' — isn't something I coded as a fixed rule for this snippet. It's the agent reading its own telemetry and deciding, live, in the same request. This is the differentiator: DevGuard doesn't just get observed — it observes itself, and adapts."
 
-**Show:** The benchmark accuracy strip (92% / 88% / 95% / 5% FPR) — one beat, don't dwell.
+**Show:** _Nothing yet._ The benchmark harness (`backend/core/benchmark.py`) exists and includes a
+negative control, but it has never been run to an artifact — so there are no accuracy figures to
+show. Do not quote any. Either run the harness and read the numbers off its output, or cut this
+beat. (LAW 6: the numbers come from the machine.)
 
 ---
 

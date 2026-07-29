@@ -10,7 +10,7 @@ Built for the [Agents of SigNoz](https://www.wemakedevs.org/hackathons/signoz) h
 
 ## The Problem
 
-Manual security code review costs organizations roughly **$85/hour of engineer time**, doesn't scale with commit velocity, and catches vulnerabilities *after* they're merged, not before. DevGuard AI turns that into an automated, self-verifying, fully-traced pipeline that runs in seconds, not hours — and unlike a typical LLM wrapper, it proves its own work: every fix is adversarially reviewed, retried until it passes a quality bar, hash-chained into an audit trail, and fully traced end-to-end in SigNoz.
+Manual security code review does not scale with commit velocity, and catches vulnerabilities *after* they're merged, not before. DevGuard AI turns that into an automated, self-verifying, fully-traced pipeline that runs in seconds, not hours — and unlike a typical LLM wrapper, it proves its own work: every fix is adversarially reviewed, retried until it passes a quality bar, hash-chained into an audit trail, and fully traced end-to-end in SigNoz.
 
 ## The Differentiator: Self-Observation
 
@@ -57,7 +57,7 @@ Every adaptation is: **(a)** returned in the API response as `self_observation`,
 | Layer | Technology |
 |---|---|
 | Frontend | Next.js 14 (App Router), TypeScript, Tailwind, Framer Motion, Monaco Editor |
-| Backend | FastAPI, Python 3.12, async throughout |
+| Backend | FastAPI, Python 3.11, async throughout |
 | AI Engine | Groq (Llama 3.3 70B / 3.1 8B — severity + telemetry-routed), swap point marked for GPT-5.6 |
 | Vector Store | In-process CWE/OWASP RAG store |
 | Observability | OpenTelemetry → SigNoz (self-hosted via SigNoz Foundry) |
@@ -79,17 +79,14 @@ Every adaptation is: **(a)** returned in the API response as `self_observation`,
 ## Quickstart (local)
 
 ```bash
-git clone https://github.com/bichukaleakash809-lang/devguard-ai.git
+git clone https://github.com/akashbichukale111/devguard-ai.git
 cd devguard-ai
 cp .env.example .env   # add your GROQ_API_KEY
-
-# Stand up SigNoz locally via Foundry (required — see casting.yaml)
-foundryctl cast -f casting.yaml
 
 # Backend
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-python -m uvicorn backend.main:app --reload --port 8001
+python -m uvicorn backend.main:app --reload --port 8000
 
 # Frontend
 cd frontend && npm install && npm run dev
@@ -99,10 +96,10 @@ Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI 
 
 ## SigNoz Usage
 
-- **Traces** — every scan is one distributed trace: `devguard_pipeline → scanner_agent / fixer_agent / validator_agent`, plus self-observation spans
-- **Dashboards** — `signoz/dashboard.json`, including adaptive-routing-override frequency and cumulative cost vs. conservation threshold
-- **Alerts** — `signoz/alerts.md`: SLO degradation, circuit breaker stuck open, cost budget exceeded
-- **MCP** — the self-observation layer queries SigNoz's MCP server directly from agent code (see `backend/core/mcp_client.py`); falls back to a local in-process cost shadow when the MCP call path is unavailable, so the demo is never dependent on network conditions
+- **Traces** — the pipeline is instrumented so each scan emits one distributed trace (`devguard_pipeline → scanner_agent / fixer_agent / validator_agent`) plus self-observation spans, with logs bridged to the same trace via OpenTelemetry's `LoggingHandler`. **Not yet verified end to end against a running SigNoz instance** — see Limitations.
+- **Dashboards** — `signoz/dashboard.json` is committed but has not been imported and verified against a live SigNoz.
+- **Alerts** — `signoz/alerts.md` describes three intended rules. They are **not shipped**: as that file states, each depends on a metric that `telemetry.py` does not yet emit.
+- **MCP** — `backend/core/mcp_client.py` provides a fail-safe client interface for the SigNoz MCP server. **It has not been verified against a real MCP server**: the transport and response shapes are unconfirmed (the file carries its own TODO). When the call path is unavailable the cost query falls back to an in-process estimate, which is reported as `data_source: "local_shadow"` — never as live telemetry.
 
 ## Reproducibility
 
@@ -112,6 +109,18 @@ foundryctl cast -f casting.yaml
 ```
 `casting.yaml.lock` pins the resolved configuration.
 
+## Limitations
+
+Stated plainly, because a claim a judge can disprove costs more than the feature was worth. Full detail in `docs/AUDIT.md`.
+
+- **SigNoz has never been verified end to end.** Traces, the dashboard and the log↔trace bridge are implemented but unproven against a running instance. No screenshot of a real DevGuard trace exists yet.
+- **The MCP self-observation path is unverified.** `mcp_client.py` targets an assumed HTTP transport; real MCP is JSON-RPC. Its default URL is not a SigNoz address. Treat the "agents query their own telemetry via MCP" idea as designed-and-stubbed, not demonstrated.
+- **The Nexus god-mode endpoints run synthetically when called with an empty body**, which is what the UI currently sends. Panels badge every response with its real provenance (`LIVE` / `LOCAL` / `SIMULATED` / `PARTIAL`), so what you see is labelled honestly — but most of it is currently `SIMULATED`.
+- **No test suite and no CI yet.**
+- **Docker images do not build.** `backend/Dockerfile` copies files from outside its build context and there is no `frontend/Dockerfile`. Run the backend and frontend directly for now.
+- **The benchmark harness has never been run to an artifact**, so no accuracy figures are published anywhere.
+- **No `LICENSE` file yet.** One must be added before this is distributed.
+
 ## License
 
-MIT
+See `LICENSE`. **Not yet added — see Limitations.**
