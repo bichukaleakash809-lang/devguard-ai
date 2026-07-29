@@ -1,0 +1,40 @@
+make doctor — preflight (contract §4.3)
+Captured: 2026-07-29T19:15:59Z
+
+--- healthy environment, no GROQ_API_KEY (exit 0) ---
+
+DevGuard doctor  preflight diagnosis
+
+  OK        Python                            3.11.15 (>= 3.10)
+  OK        Node.js                           v22.22.2 (>= 18)
+  OK        Backend dependencies              all 8 importable
+  OK        Backend imports                   `import backend.main` succeeds with no API key set
+  OPTIONAL  GROQ_API_KEY                      not set — the server runs, but POST /scan cannot call an LLM
+  OPTIONAL  OTEL_EXPORTER_OTLP_ENDPOINT       not set — defaults to http://localhost:4317
+  OPTIONAL  SIGNOZ_MCP_URL                    not set — self-observation uses the in-process shadow
+  OK        File .env.example                 present
+  OK        File requirements.txt             present
+  OK        File otel-collector-config.yaml   present
+  OK        Frontend deps                     node_modules present
+  OPTIONAL  LICENSE                           no LICENSE file yet
+  OPTIONAL  Backend reachable                 nothing listening on http://localhost:8000/slo-status
+  OPTIONAL  Frontend reachable                nothing listening on http://localhost:3000
+
+Optional — not required to run DevGuard:
+  GROQ_API_KEY: cp .env.example .env and add your key from https://console.groq.com/keys
+  OTEL_EXPORTER_OTLP_ENDPOINT: Telemetry is fail-safe; nothing breaks if no collector is running.
+  SIGNOZ_MCP_URL: Expected. Reported as data_source 'local_shadow', never 'live'.
+  LICENSE: Tracked as an open decision in docs/HANDOFF.md.
+  Backend reachable: Start it, or ignore this if you only wanted a static check.
+  Frontend reachable: Start it, or ignore this if you only wanted a static check.
+
+doctor: all required checks passed.
+Start the backend:  python -m uvicorn backend.main:app --port 8000
+Start the frontend: cd frontend && npm run dev
+
+exit=0
+
+--- interpreter missing dependencies (exit 1) ---
+  MISSING   Backend dependencies              8 missing: fastapi, uvicorn[standard], pydantic, httpx, groq, opentelemetry-sdk, opentelemetry-instrumentation-fastapi, opentelemetry-instrumentation-logging
+  MISSING   Backend imports                   ModuleNotFoundError: No module named 'fastapi'
+doctor: 2 required check(s) failed.
