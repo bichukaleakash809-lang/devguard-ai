@@ -92,6 +92,29 @@ Any deployment whose collector went away would have hung on restart or redeploy.
 | `4cf03d2` | `make doctor` preflight + Makefile |
 | `bf05d2d` | CI workflow (lint, typecheck, tests, OTLP verification, secret scan) |
 | `2ff27c4` | Pydantic protected-namespace warning silenced |
+| `4141e05` | Corrected a wrong CI claim (install is 86s, not "12+ minutes") |
+| `0ab21d2` | CI confirmed green end to end; badge added |
+| `1133985` | Frontend error surfaces (§4.5) — approval gate no longer fails silently |
+| `fcfbaaf` | Security: untrusted-content boundary at every agent prompt |
+
+**Tests now 70.** CI run #5 on `0ab21d2` = `success` (all three jobs).
+
+**§4.5 error-surface audit — done.** All 7 frontend `catch` blocks audited. Two
+were swallowing failures, both in `app/result/page.tsx`: the approval gate
+rolled back silently (a user clicking "Approve fix" on a critical finding saw
+no indication their decision had failed), and fetch errors discarded the reason
+so every failure rendered the same generic message. Both now surface. The two
+WebSocket `JSON.parse` catches are deliberately left ignoring malformed frames —
+connection loss is surfaced separately by `onerror`.
+
+**Security: prompt-injection boundary — added.** This was SECURITY.md's stated
+"most significant open issue". Every agent system prompt now carries
+`UNTRUSTED_CONTENT_RULE`, and `fence_untrusted()` wraps untrusted content in
+sentinel markers rather than a ``` block (untrusted code can contain ``` and
+break out of a markdown fence). The Fixer's own free-text output is fenced when
+it reaches the Validator, since it inherits the taint. 12 tests.
+**Mitigated, not solved** — SECURITY.md says so explicitly; the residual
+false-negative risk is real and stated.
 
 **Tests: 58 passing**, all with no API key, no collector, no network.
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
