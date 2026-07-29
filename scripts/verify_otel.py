@@ -61,6 +61,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # --require-agent-spans.
 EXPECTED_SPAN_SUBSTRINGS = ["slo-status", "god-mode"]
 
+# Only produced by a real LLM-backed scan; asserted under --require-agent-spans.
+AGENT_SPAN_SUBSTRINGS = ["scan_request", "scanner_agent"]
+
 
 class Collected:
     """Everything the receiver decoded, kept in memory for assertions."""
@@ -150,8 +153,20 @@ def wait_for(url: str, timeout_s: float = 60.0) -> bool:
     return False
 
 
-def drive_traffic(base: str) -> list[str]:
-    """Real HTTP requests against the running backend. No LLM key required."""
+VULNERABLE_SNIPPET = (
+    "def get_user(user_id):\n"
+    '    query = "SELECT * FROM users WHERE id = " + user_id\n'
+    "    return db.execute(query)\n"
+)
+
+
+def drive_traffic(base: str, include_scan: bool = False) -> list[str]:
+    """Real HTTP requests against the running backend.
+
+    The default set needs no LLM key. `include_scan` additionally posts a real
+    vulnerable snippet to /scan, which exercises the agent pipeline and is the
+    only way DevGuard's own agent spans are produced.
+    """
     import urllib.request
 
     hit = []
@@ -169,6 +184,19 @@ def drive_traffic(base: str) -> list[str]:
         with urllib.request.urlopen(req, timeout=30) as r:
             r.read()
             hit.append(f"POST {path} -> {r.status}")
+
+    if include_scan:
+        body = json.dumps({"code": VULNERABLE_SNIPPET}).encode()
+        req = urllib.request.Request(
+            f"{base}/scan",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # A real reflection loop can take a while; allow for it.
+        with urllib.request.urlopen(req, timeout=180) as r:
+            r.read()
+            hit.append(f"POST /scan -> {r.status}")
     return hit
 
 
@@ -176,7 +204,25 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--evidence-dir", default="docs/audit-evidence/t2")
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument(
+        "--require-agent-spans",
+        action="store_true",
+        help=(
+            "Additionally drive POST /scan and require DevGuard's own pipeline "
+            "spans (scan_request, and the scanner/fixer/validator agent spans). "
+            "Needs a live GROQ_API_KEY in the environment; the run fails fast "
+            "with a clear message if one is not set."
+        ),
+    )
     args = ap.parse_args()
+
+    if args.require_agent_spans and not os.environ.get("GROQ_API_KEY"):
+        print(
+            "[fatal] --require-agent-spans needs GROQ_API_KEY set: DevGuard's "
+            "agent spans are only emitted by a real LLM-backed scan. Re-run "
+            "without the flag to verify the no-key surface only."
+        )
+        return 2
 
     otlp_port = free_port()
     app_port = free_port()
@@ -185,7 +231,8 @@ def main() -> int:
     print(f"[receiver] OTLP/gRPC listening on 127.0.0.1:{otlp_port}")
 
     env = dict(os.environ)
-    env.pop("GROQ_API_KEY", None)      # prove it runs without a key
+    if not args.require_agent_spans:
+        env.pop("GROQ_API_KEY", None)  # prove it runs without a key
     env.pop("SIGNOZ_MCP_URL", None)
     env.pop("OTEL_SDK_DISABLED", None)  # telemetry MUST be on for this test
     env.update(
@@ -216,9 +263,10 @@ def main() -> int:
             out = proc.stdout.read() if proc.stdout else ""
             print("[fatal] backend did not start:\n" + out[-3000:])
             return 2
-        print(f"[backend] up on {base} (no GROQ_API_KEY set)")
+        keystate = "GROQ_API_KEY set" if args.require_agent_spans else "no GROQ_API_KEY set"
+        print(f"[backend] up on {base} ({keystate})")
 
-        traffic = drive_traffic(base)
+        traffic = drive_traffic(base, include_scan=args.require_agent_spans)
         for line in traffic:
             print(f"[traffic] {line}")
 
@@ -247,6 +295,13 @@ def main() -> int:
     for needle in EXPECTED_SPAN_SUBSTRINGS:
         if not any(needle in n for n in names):
             failures.append(f"no span name containing {needle!r}")
+
+    if args.require_agent_spans:
+        for needle in AGENT_SPAN_SUBSTRINGS:
+            if not any(needle in n for n in names):
+                failures.append(
+                    f"--require-agent-spans: no span name containing {needle!r}"
+                )
 
     # Resource attribution
     svc = {s["resource"].get("service.name") for s in sink.spans}
@@ -290,7 +345,8 @@ def main() -> int:
     evidence = {
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "otlp_endpoint": f"http://127.0.0.1:{otlp_port}",
-        "groq_api_key_set": False,
+        "groq_api_key_set": bool(args.require_agent_spans),
+        "agent_spans_required": bool(args.require_agent_spans),
         "traffic": traffic,
         "span_count": len(sink.spans),
         "log_count": len(sink.logs),
