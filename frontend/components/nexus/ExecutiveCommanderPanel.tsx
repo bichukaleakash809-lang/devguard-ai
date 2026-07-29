@@ -1,241 +1,29 @@
 "use client";
 
-import { useMemo } from "react";
-import { motion } from "framer-motion";
-import CountUp from "react-countup";
+import {
+  DataSourceBadge,
+  NotAvailable,
+  PanelEmptyState,
+  RunMeta,
+  Value,
+  pickArray,
+  pickObject,
+  pickString,
+  type PanelProps,
+} from "./_shared";
 
 /* -------------------------------------------------------------------------- */
-/*  ExecutiveCommanderPanel — "Mobile SRE & Auto-Reporter" visual module      */
+/*  ExecutiveCommanderPanel — cross-module roll-up                            */
 /*                                                                            */
-/*  No Monaco here — this module's job is the executive-facing artifacts     */
-/*  (a phone notification and a PDF), not a code diff, so the visual grammar  */
-/*  leans on the phone-bezel mockup and a light "paper" card deliberately     */
-/*  inverted against the dark theme — the one place a bright surface is       */
-/*  correct, because a PDF preview that's dark-on-dark reads as broken, not   */
-/*  stylish. Everything else (gauge, glass, glow) matches the other 4 panels. */
+/*  Renders only what generate_executive_summary() actually returns: the      */
+/*  composed slack_message, which sections ran, and which were omitted. The   */
+/*  previous health gauge, "cost avoided" figure, phone mock and PDF preview  */
+/*  had no backend counterpart and were invented, so they are gone.           */
+/*                                                                            */
+/*  Note: each section carries its own data_source, and they frequently       */
+/*  disagree with the roll-up's own label — so per-section provenance is      */
+/*  rendered explicitly rather than collapsed into one badge.                 */
 /* -------------------------------------------------------------------------- */
-
-export interface ExecutiveCommanderData {
-  healthScore: number; // 0-100
-  slackChannel: string;
-  slackAlertTitle: string;
-  slackAlertBody: string;
-  deployButtonLabel: string;
-  reportTitle: string;
-  reportGeneratedAt: string;
-  reportSummaryLines: string[];
-  reportStats: { label: string; value: string }[];
-}
-
-const DEFAULT_DATA: ExecutiveCommanderData = {
-  healthScore: 97,
-  slackChannel: "#sre-oncall",
-  slackAlertTitle: "DevGuard God Mode — Incident Digest",
-  slackAlertBody:
-    "4 modules ran concurrently. 1 critical SQLi patched (converged, eval 92/100). Cost spike contained. Breaker-trip forecast averted. All fixes ready for sign-off.",
-  deployButtonLabel: "Approve & Deploy All",
-  reportTitle: "Executive SRE Summary",
-  reportGeneratedAt: "Generated moments ago",
-  reportSummaryLines: [
-    "Omni-Heal patched CWE-89 (SQLi) in fixer_agent — converged in 1 reflection attempt, eval_score 92/100.",
-    "FinOps Agent detected a 30-min spend spike ($4.80 vs $1.00 budget) and reduced OTel sampling to 5% while keeping error/critical spans at full fidelity.",
-    "Pre-Cog Ops forecast a circuit-breaker trip in ~9 minutes and recommended scaling replicas 2 → 5 ahead of time.",
-    "Truth Serum Agent rejected one low-confidence finding (0.31) before it reached the Fixer, then accepted the corrected re-scan (0.94).",
-  ],
-  reportStats: [
-    { label: "Modules run", value: "4/4" },
-    { label: "Critical fixes", value: "1" },
-    { label: "Cost avoided", value: "$1,250" },
-    { label: "Health score", value: "97%" },
-  ],
-};
-
-/* ---- Global health gauge — semicircle speedometer -------------------------- */
-
-function HealthGauge({ score }: { score: number }) {
-  const color = score >= 80 ? "#34d399" : score >= 50 ? "#fbbf24" : "#f43f5e";
-  const angleDeg = 180 - (score / 100) * 180;
-  const rad = (angleDeg * Math.PI) / 180;
-  const cx = 100;
-  const cy = 100;
-  const needleR = 66;
-  const needleX = cx + needleR * Math.cos(rad);
-  const needleY = cy - needleR * Math.sin(rad);
-
-  return (
-    <div className="relative mx-auto" style={{ width: 200, height: 118 }}>
-      <svg width="200" height="118" viewBox="0 0 200 110">
-        {/* Background track */}
-        <path
-          d="M20,100 A80,80 0 0,1 180,100"
-          fill="none"
-          stroke="rgba(255,255,255,0.08)"
-          strokeWidth="14"
-          strokeLinecap="round"
-        />
-        {/* Progress arc */}
-        <motion.path
-          d="M20,100 A80,80 0 0,1 180,100"
-          fill="none"
-          stroke={color}
-          strokeWidth="14"
-          strokeLinecap="round"
-          initial={{ pathLength: 0 }}
-          animate={{ pathLength: score / 100 }}
-          transition={{ duration: 1.4, ease: [0.22, 1, 0.36, 1] }}
-        />
-        {/* Needle */}
-        <motion.line
-          x1={cx}
-          y1={cy}
-          stroke="white"
-          strokeWidth={2.5}
-          strokeLinecap="round"
-          initial={{ x2: cx - 66, y2: cy }}
-          animate={{ x2: needleX, y2: needleY }}
-          transition={{ duration: 1.4, ease: [0.22, 1, 0.36, 1] }}
-        />
-        <circle cx={cx} cy={cy} r={5} fill="white" />
-      </svg>
-      <div className="absolute inset-x-0 bottom-0 flex flex-col items-center">
-        <span className="text-2xl font-bold tabular-nums text-white">
-          <CountUp end={score} duration={1.4} suffix="%" />
-        </span>
-        <span className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-          Global health
-        </span>
-      </div>
-    </div>
-  );
-}
-
-/* ---- iPhone simulator ------------------------------------------------------- */
-
-function PhoneSimulator({
-  channel,
-  title,
-  body,
-  buttonLabel,
-}: {
-  channel: string;
-  title: string;
-  body: string;
-  buttonLabel: string;
-}) {
-  return (
-    <div className="mx-auto w-[240px]">
-      {/* Bezel */}
-      <div className="nx-phone-bezel relative rounded-[2.25rem] border-[6px] border-[#0b0c12] bg-[#0b0c12] p-2 shadow-2xl">
-        {/* Notch */}
-        <div className="absolute left-1/2 top-2 z-10 h-4 w-20 -translate-x-1/2 rounded-full bg-black" />
-        {/* Screen */}
-        <div className="relative overflow-hidden rounded-[1.6rem] bg-gradient-to-b from-[#1a1d29] to-[#0e0f16]">
-          {/* Status bar */}
-          <div className="flex items-center justify-between px-4 pb-1 pt-3 text-[9px] font-medium text-white/60">
-            <span>9:41</span>
-            <span>&#128246; &#128225; &#128267;</span>
-          </div>
-
-          {/* Notification card (Slack-style) */}
-          <div className="px-3 pb-3 pt-2">
-            <motion.div
-              initial={{ opacity: 0, y: -12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-              className="rounded-xl border border-white/10 bg-white/[0.06] p-3 backdrop-blur"
-            >
-              <div className="flex items-center gap-1.5">
-                <div className="flex h-5 w-5 items-center justify-center rounded-md bg-gradient-to-br from-cyan-400 to-indigo-500 text-[9px] font-bold text-white">
-                  &#9889;
-                </div>
-                <span className="text-[9px] font-semibold text-white/80">DevGuard Bot</span>
-                <span className="ml-auto text-[8px] text-white/35">{channel}</span>
-              </div>
-              <div className="mt-1.5 text-[10px] font-semibold text-white/90">{title}</div>
-              <p className="mt-1 text-[9.5px] leading-relaxed text-white/60">{body}</p>
-            </motion.div>
-
-            {/* Deploy button */}
-            <motion.button
-              type="button"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.97 }}
-              transition={{ duration: 0.15 }}
-              className="nx-deploy-btn relative mt-4 flex w-full items-center justify-center gap-1.5 overflow-hidden rounded-xl px-3 py-3 text-[10.5px] font-bold uppercase tracking-wider text-white"
-            >
-              <span className="nx-deploy-border" aria-hidden />
-              <span className="relative z-10">&#9889; {buttonLabel}</span>
-            </motion.button>
-
-            <div className="mt-4 flex items-center justify-center gap-1.5 text-[8px] text-white/25">
-              <span className="h-1 w-1 rounded-full bg-white/25" />
-              swipe up to dismiss
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---- PDF report preview ----------------------------------------------------- */
-
-function PdfPreview({
-  title,
-  generatedAt,
-  summaryLines,
-  stats,
-}: {
-  title: string;
-  generatedAt: string;
-  summaryLines: string[];
-  stats: { label: string; value: string }[];
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 16, rotateX: -4 }}
-      animate={{ opacity: 1, y: 0, rotateX: 0 }}
-      transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-      className="relative mx-auto w-full max-w-sm rounded-lg bg-[#f4f1ea] p-5 text-[#1c1c1c] shadow-[0_20px_60px_-20px_rgba(0,0,0,0.6)]"
-    >
-      <span className="absolute -top-2 right-4 rounded-sm bg-rose-600 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white shadow">
-        PDF
-      </span>
-      <div className="flex items-center justify-between border-b border-black/10 pb-2">
-        <div>
-          <div className="text-[13px] font-bold tracking-tight">{title}</div>
-          <div className="text-[9px] text-black/45">{generatedAt}</div>
-        </div>
-        <div className="flex h-6 w-6 items-center justify-center rounded bg-black/80 text-[10px] font-bold text-white">
-          D
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-4 gap-2">
-        {stats.map((s) => (
-          <div key={s.label} className="rounded bg-black/[0.04] px-1.5 py-1.5 text-center">
-            <div className="text-[11px] font-bold tabular-nums">{s.value}</div>
-            <div className="text-[7px] uppercase tracking-wide text-black/45">{s.label}</div>
-          </div>
-        ))}
-      </div>
-
-      <ul className="mt-3 space-y-1.5">
-        {summaryLines.map((line, i) => (
-          <li key={i} className="flex gap-1.5 text-[9.5px] leading-snug text-black/70">
-            <span className="mt-1 h-1 w-1 flex-none rounded-full bg-black/40" />
-            {line}
-          </li>
-        ))}
-      </ul>
-
-      <div className="mt-3 flex items-center justify-between border-t border-black/10 pt-2 text-[8px] text-black/35">
-        <span>DevGuard AI &middot; SigNoz Nexus</span>
-        <span>Page 1 of 1</span>
-      </div>
-    </motion.div>
-  );
-}
 
 /* ---- Shared HUD panel chrome (self-contained) ------------------------------- */
 
@@ -329,10 +117,31 @@ function NexusPanelStyles() {
   );
 }
 
+
 /* ---- Main panel --------------------------------------------------------------- */
 
-export default function ExecutiveCommanderPanel({ data }: { data?: Partial<ExecutiveCommanderData> }) {
-  const d = useMemo(() => ({ ...DEFAULT_DATA, ...data }), [data]);
+export default function ExecutiveCommanderPanel({
+  data,
+  status,
+  error,
+  elapsedMs,
+  onRunSingle,
+}: PanelProps) {
+  const slackMessage = pickString(data, "slack_message");
+  const sections = pickObject(data, "sections");
+  const omitted = pickArray(data, "omitted_sections");
+
+  const sectionRows = sections
+    ? Object.entries(sections).map(([name, payload]) => {
+        const p = (payload ?? {}) as Record<string, unknown>;
+        return {
+          name,
+          source: typeof p.data_source === "string" ? (p.data_source as string) : null,
+        };
+      })
+    : [];
+
+  const hasData = status === "complete" && data !== null;
 
   return (
     <div
@@ -345,49 +154,105 @@ export default function ExecutiveCommanderPanel({ data }: { data?: Partial<Execu
       <span className="nx-corner nx-corner-bl" />
       <span className="nx-corner nx-corner-br" />
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <span className="rounded-md border border-rose-400/25 px-2 py-0.5 text-[10px] font-semibold tracking-widest text-rose-300">
             MOD-05
           </span>
           <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">
-            Executive SRE Commander
+            Executive Commander
           </h2>
           <p className="mt-1 text-xs font-medium uppercase tracking-wider text-rose-300">
-            Mobile sync &amp; auto-reporter
+            Cross-module roll-up
           </p>
+          <RunMeta data={data} elapsedMs={elapsedMs} />
         </div>
-        <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
-          {d.healthScore}% healthy
-        </span>
+        <DataSourceBadge data={data} status={status} />
       </div>
 
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Health gauge */}
-        <div className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-black/20 p-5">
-          <HealthGauge score={d.healthScore} />
-        </div>
+      {!hasData ? (
+        <PanelEmptyState
+          status={status}
+          error={error}
+          onRunSingle={onRunSingle}
+          accentClass="text-rose-300"
+        />
+      ) : (
+        <>
+          {/* Per-section provenance. The roll-up's own data_source tracks whether
+              anything errored, not whether the underlying data was real, so the
+              sections are listed with their individual labels. */}
+          <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="mb-3 text-[10px] font-medium uppercase tracking-wider text-white/40">
+              Sections included &middot; provenance per module
+            </div>
+            {sectionRows.length === 0 ? (
+              <p className="text-xs text-white/40">
+                No sections returned — <NotAvailable />
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {sectionRows.map((row) => (
+                  <li
+                    key={row.name}
+                    className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.06] px-3 py-2"
+                  >
+                    <span className="font-mono text-[11px] text-white/75">{row.name}</span>
+                    <SourceTag source={row.source} />
+                  </li>
+                ))}
+              </ul>
+            )}
 
-        {/* iPhone simulator */}
-        <div className="flex items-center justify-center rounded-xl border border-white/10 bg-black/20 p-5">
-          <PhoneSimulator
-            channel={d.slackChannel}
-            title={d.slackAlertTitle}
-            body={d.slackAlertBody}
-            buttonLabel={d.deployButtonLabel}
-          />
-        </div>
+            {omitted && omitted.length > 0 && (
+              <p className="mt-3 text-xs text-amber-300/85">
+                Omitted this run: {omitted.map(String).join(", ")}
+              </p>
+            )}
+          </div>
 
-        {/* PDF preview */}
-        <div className="flex items-center justify-center rounded-xl border border-white/10 bg-black/20 p-5">
-          <PdfPreview
-            title={d.reportTitle}
-            generatedAt={d.reportGeneratedAt}
-            summaryLines={d.reportSummaryLines}
-            stats={d.reportStats}
-          />
-        </div>
-      </div>
+          {/* The composed summary, verbatim */}
+          <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                Composed summary
+              </span>
+              <span className="rounded-full border border-white/12 bg-white/[0.04] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white/45">
+                Preview — not sent
+              </span>
+            </div>
+            {slackMessage === null ? (
+              <NotAvailable />
+            ) : (
+              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-white/75">
+                {slackMessage}
+              </pre>
+            )}
+          </div>
+        </>
+      )}
     </div>
+  );
+}
+
+function SourceTag({ source }: { source: string | null }) {
+  if (source === "live") {
+    return (
+      <span className="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-emerald-500/15 text-emerald-300">
+        Live
+      </span>
+    );
+  }
+  if (source === "synthetic") {
+    return (
+      <span className="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-amber-500/15 text-amber-300">
+        Simulated
+      </span>
+    );
+  }
+  return (
+    <span className="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-white/10 text-white/45">
+      Unlabelled
+    </span>
   );
 }

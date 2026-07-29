@@ -261,8 +261,6 @@ export default function NexusCommandCenter() {
               status pill, stat + readout column. */}
           <section className="mt-10 flex flex-col gap-6">
             <OmniHealPanel
-              mod={MODULES[0]}
-              result={results.omniHeal}
               data={results.omniHeal.data}
               status={results.omniHeal.status}
               error={results.omniHeal.error}
@@ -270,8 +268,6 @@ export default function NexusCommandCenter() {
               onRunSingle={() => runModule(MODULES[0])}
             />
             <FinOpsPanel
-              mod={MODULES[1]}
-              result={results.finOps}
               data={results.finOps.data}
               status={results.finOps.status}
               error={results.finOps.error}
@@ -279,8 +275,6 @@ export default function NexusCommandCenter() {
               onRunSingle={() => runModule(MODULES[1])}
             />
             <PreCogPanel
-              mod={MODULES[2]}
-              result={results.preCog}
               data={results.preCog.data}
               status={results.preCog.status}
               error={results.preCog.error}
@@ -288,8 +282,6 @@ export default function NexusCommandCenter() {
               onRunSingle={() => runModule(MODULES[2])}
             />
             <LLMJudgePanel
-              mod={MODULES[3]}
-              result={results.truthSerum}
               data={results.truthSerum.data}
               status={results.truthSerum.status}
               error={results.truthSerum.error}
@@ -297,8 +289,6 @@ export default function NexusCommandCenter() {
               onRunSingle={() => runModule(MODULES[3])}
             />
             <ExecutiveCommanderPanel
-              mod={MODULES[4]}
-              result={results.execCommander}
               data={results.execCommander.data}
               status={results.execCommander.status}
               error={results.execCommander.error}

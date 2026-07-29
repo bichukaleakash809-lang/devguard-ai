@@ -1,9 +1,18 @@
 "use client";
 
-import { useMemo } from "react";
 import { motion } from "framer-motion";
-import CountUp from "react-countup";
-import { DiffEditor } from "@monaco-editor/react";
+import {
+  DataSourceBadge,
+  NotAvailable,
+  PanelEmptyState,
+  RunMeta,
+  Value,
+  pickBool,
+  pickNumber,
+  pickObject,
+  pickString,
+  type PanelProps,
+} from "./_shared";
 
 /* -------------------------------------------------------------------------- */
 /*  FinOpsPanel — "Cost Controller" visual module                             */
@@ -16,157 +25,76 @@ import { DiffEditor } from "@monaco-editor/react";
 /*  the Result Dashboard.                                                     */
 /* -------------------------------------------------------------------------- */
 
-export interface FinOpsData {
-  costSeries: number[]; // relative units, spike then settle — used to draw the line
-  spikeUsd: number;
-  normalUsd: number;
-  budgetUsd: number;
-  yamlBefore: string;
-  yamlAfter: string;
-  moneySavedUsd: number;
-  costReductionPct: number;
-}
+/* ---- Spend vs budget ------------------------------------------------------
+   The backend reports two scalars for the 30-minute window — spend and budget.
+   It does not report a time series, so this renders a two-bar comparison of
+   the values that actually exist rather than the invented 13-point sparkline
+   that used to live here. */
 
-const DEFAULT_DATA: FinOpsData = {
-  costSeries: [12, 14, 13, 18, 46, 88, 96, 62, 30, 18, 15, 14, 13],
-  spikeUsd: 4.8,
-  normalUsd: 0.42,
-  budgetUsd: 1.0,
-  yamlBefore:
-    "processors:\n  probabilistic_sampler:\n    sampling_percentage: 100\n    # full-fidelity tracing — fine at baseline spend\n",
-  yamlAfter:
-    "processors:\n  probabilistic_sampler:\n    sampling_percentage: 5\n    # cost-guardian override: 30-min spend exceeded budget.\n    # error + critical-severity spans are exempted below.\n  always_sample:\n    - status: error\n    - severity: critical\n",
-  moneySavedUsd: 1250,
-  costReductionPct: 74,
-};
-
-/* ---- Cost / ingestion graph ------------------------------------------------ */
-
-function CostGraph({ series, budgetUsd, spikeUsd }: { series: number[]; budgetUsd: number; spikeUsd: number }) {
-  const width = 560;
-  const height = 160;
-  const max = Math.max(...series);
-  const stepX = width / (series.length - 1);
-
-  const points = series.map((v, i) => {
-    const x = i * stepX;
-    const y = height - (v / max) * (height - 20) - 10;
-    return [x, y] as const;
-  });
-
-  const linePath = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-  const areaPath = `${linePath} L${width},${height} L0,${height} Z`;
-
-  const spikeIndex = series.indexOf(max);
-  const spikePoint = points[spikeIndex];
-  const budgetY = height - (budgetUsd / (spikeUsd * 1.05)) * (height - 20) - 10;
-
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-40 w-full overflow-visible">
-      <defs>
-        <linearGradient id="finops-area" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="rgba(52,211,153,0.35)" />
-          <stop offset="100%" stopColor="rgba(52,211,153,0)" />
-        </linearGradient>
-      </defs>
-
-      {/* Budget threshold line */}
-      <line
-        x1={0}
-        x2={width}
-        y1={budgetY}
-        y2={budgetY}
-        stroke="rgba(251,191,36,0.5)"
-        strokeDasharray="4 4"
-        strokeWidth={1}
-      />
-      <text x={width - 2} y={budgetY - 6} textAnchor="end" fontSize="9" fill="rgba(251,191,36,0.75)">
-        budget ${budgetUsd.toFixed(2)}
-      </text>
-
-      <motion.path
-        d={areaPath}
-        fill="url(#finops-area)"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.8, delay: 0.4 }}
-      />
-      <motion.path
-        d={linePath}
-        fill="none"
-        stroke="#34d399"
-        strokeWidth={2}
-        strokeLinecap="round"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 1.6, ease: [0.22, 1, 0.36, 1] }}
-      />
-
-      {/* Spike marker */}
-      {spikePoint && (
-        <motion.circle
-          cx={spikePoint[0]}
-          cy={spikePoint[1]}
-          r={4}
-          fill="#fb7185"
-          initial={{ scale: 0 }}
-          animate={{ scale: [0, 1.4, 1] }}
-          transition={{ delay: 1.1, duration: 0.5 }}
-        />
-      )}
-      {spikePoint && (
-        <text
-          x={spikePoint[0]}
-          y={spikePoint[1] - 10}
-          textAnchor="middle"
-          fontSize="9"
-          fill="#fb7185"
-          fontWeight={600}
-        >
-          spike detected
-        </text>
-      )}
-    </svg>
-  );
-}
-
-/* ---- ROI meter -------------------------------------------------------------- */
-
-function RoiMeter({ moneySavedUsd, costReductionPct }: { moneySavedUsd: number; costReductionPct: number }) {
-  const circumference = 2 * Math.PI * 42;
-  const dash = (costReductionPct / 100) * circumference;
-
-  return (
-    <div className="nx-roi-glow flex items-center gap-5 rounded-xl border border-emerald-400/25 bg-emerald-500/[0.04] p-5">
-      <div className="relative h-24 w-24 flex-none">
-        <svg width="96" height="96" viewBox="0 0 96 96" className="-rotate-90">
-          <circle cx="48" cy="48" r="42" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="7" />
-          <motion.circle
-            cx="48"
-            cy="48"
-            r="42"
-            fill="none"
-            stroke="#34d399"
-            strokeWidth="7"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            initial={{ strokeDashoffset: circumference }}
-            animate={{ strokeDashoffset: circumference - dash }}
-            transition={{ duration: 1.3, ease: "easeOut" }}
-          />
-        </svg>
-        <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-emerald-300">
-          <CountUp end={costReductionPct} duration={1.4} suffix="%" />
+function SpendVsBudget({ spend, budget }: { spend: number | null; budget: number | null }) {
+  if (spend === null || budget === null) {
+    return (
+      <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-white/10">
+        <span className="text-xs text-white/40">
+          Spend / budget not reported for this run — <NotAvailable />
         </span>
       </div>
+    );
+  }
+
+  const scale = Math.max(spend, budget) || 1;
+  const spendPct = (spend / scale) * 100;
+  const budgetPct = (budget / scale) * 100;
+  const overBudget = spend > budget;
+
+  return (
+    <div className="flex h-40 flex-col justify-center gap-5 px-1">
       <div>
-        <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">Money saved</div>
-        <div className="text-3xl font-semibold tabular-nums tracking-tight text-white">
-          <CountUp end={moneySavedUsd} duration={1.6} prefix="$" separator="," useEasing />
+        <div className="mb-1.5 flex items-baseline justify-between">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-white/45">
+            Spend · last 30 min
+          </span>
+          <span
+            className={`font-mono text-sm font-semibold ${
+              overBudget ? "text-rose-300" : "text-emerald-300"
+            }`}
+          >
+            ${spend.toFixed(4)}
+          </span>
         </div>
-        <p className="mt-1 text-xs font-medium text-emerald-300">
-          via adaptive sampling &amp; cost-aware routing
-        </p>
+        <div className="h-2.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
+          <motion.div
+            className={`h-full rounded-full ${overBudget ? "bg-rose-400" : "bg-emerald-400"}`}
+            initial={{ width: 0 }}
+            animate={{ width: `${spendPct}%` }}
+            transition={{ duration: 1.1, ease: [0.22, 1, 0.36, 1] }}
+          />
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-1.5 flex items-baseline justify-between">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-white/45">
+            Budget · per 30 min
+          </span>
+          <span className="font-mono text-sm font-semibold text-amber-300">
+            ${budget.toFixed(2)}
+          </span>
+        </div>
+        <div className="h-2.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
+          <motion.div
+            className="h-full rounded-full bg-amber-400/70"
+            initial={{ width: 0 }}
+            animate={{ width: `${budgetPct}%` }}
+            transition={{ duration: 1.1, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
+          />
+        </div>
+      </div>
+
+      <div
+        className={`text-xs font-medium ${overBudget ? "text-rose-300" : "text-emerald-300"}`}
+      >
+        {overBudget ? "Over budget" : "Within budget"}
       </div>
     </div>
   );
@@ -226,8 +154,28 @@ function NexusPanelStyles() {
 
 /* ---- Main panel -------------------------------------------------------------- */
 
-export default function FinOpsPanel({ data }: { data?: Partial<FinOpsData> }) {
-  const d = useMemo(() => ({ ...DEFAULT_DATA, ...data }), [data]);
+export default function FinOpsPanel({ data, status, error, elapsedMs, onRunSingle }: PanelProps) {
+  const spend = pickNumber(data, "spend_usd_per_30min");
+  const budget = pickNumber(data, "budget_usd_per_30min");
+  const overBudget = pickBool(data, "over_budget");
+  const conservation = pickBool(data, "conservation_mode_active");
+  const tier = pickString(data, "model_tier_recommendation");
+  const reasoning = pickString(data, "reasoning");
+  const autoApply = pickBool(data, "auto_apply");
+
+  const sampling = pickObject(data, "sampling_config");
+  const currentRatio =
+    typeof sampling?.current_head_sampling_ratio === "number"
+      ? (sampling.current_head_sampling_ratio as number)
+      : null;
+  const recommendedRatio =
+    typeof sampling?.recommended_head_sampling_ratio === "number"
+      ? (sampling.recommended_head_sampling_ratio as number)
+      : null;
+  const configTarget =
+    typeof sampling?.config_target === "string" ? (sampling.config_target as string) : null;
+
+  const hasData = status === "complete" && data !== null;
 
   return (
     <div
@@ -240,7 +188,7 @@ export default function FinOpsPanel({ data }: { data?: Partial<FinOpsData> }) {
       <span className="nx-corner nx-corner-bl" />
       <span className="nx-corner nx-corner-br" />
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <span className="rounded-md border border-emerald-400/25 px-2 py-0.5 text-[10px] font-semibold tracking-widest text-emerald-300">
             MOD-02
@@ -249,49 +197,103 @@ export default function FinOpsPanel({ data }: { data?: Partial<FinOpsData> }) {
           <p className="mt-1 text-xs font-medium uppercase tracking-wider text-emerald-300">
             Autonomous cost controller
           </p>
+          <RunMeta data={data} elapsedMs={elapsedMs} />
         </div>
-        <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-amber-300">
-          ${d.spikeUsd.toFixed(2)}/30min spike
-        </span>
+        <DataSourceBadge data={data} status={status} />
       </div>
 
-      {/* Cost / ingestion graph */}
-      <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
-        <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-white/40">
-          LLM spend &middot; last 30 minutes
-        </div>
-        <CostGraph series={d.costSeries} budgetUsd={d.budgetUsd} spikeUsd={d.spikeUsd} />
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[1.4fr_1fr]">
-        {/* YAML config diff */}
-        <div className="overflow-hidden rounded-xl border border-white/10">
-          <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-4 py-2.5">
-            <span className="text-xs font-medium text-white/70">
-              otel-collector-config.yaml &middot; sampling_percentage 100 &rarr; 5
-            </span>
+      {!hasData ? (
+        <PanelEmptyState
+          status={status}
+          error={error}
+          onRunSingle={onRunSingle}
+          accentClass="text-emerald-300"
+        />
+      ) : (
+        <>
+          <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-white/40">
+              LLM spend vs budget &middot; last 30 minutes
+            </div>
+            <SpendVsBudget spend={spend} budget={budget} />
           </div>
-          <div className="h-56">
-            <DiffEditor
-              original={d.yamlBefore}
-              modified={d.yamlAfter}
-              language="yaml"
-              theme="vs-dark"
-              options={{
-                readOnly: true,
-                renderSideBySide: true,
-                minimap: { enabled: false },
-                fontSize: 12,
-                scrollBeyondLastLine: false,
-                glyphMargin: true,
-              }}
-            />
-          </div>
-        </div>
 
-        {/* ROI meter */}
-        <RoiMeter moneySavedUsd={d.moneySavedUsd} costReductionPct={d.costReductionPct} />
-      </div>
+          <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+            {/* Sampling recommendation — real values only */}
+            <div className="rounded-xl border border-white/10 bg-black/20 p-5">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                Head sampling ratio
+              </div>
+              <div className="mt-3 flex items-baseline gap-3">
+                <Value value={currentRatio} decimals={2} className="text-2xl font-semibold text-white" />
+                <span className="text-white/30">&rarr;</span>
+                <Value
+                  value={recommendedRatio}
+                  decimals={2}
+                  className="text-2xl font-semibold text-emerald-300"
+                />
+              </div>
+              <dl className="mt-4 space-y-2 text-xs">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-white/45">Config target</dt>
+                  <dd className="text-right font-mono text-[11px] text-white/70">
+                    <Value value={configTarget} />
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-white/45">Auto-apply</dt>
+                  <dd className="text-white/70">
+                    {autoApply === null ? <NotAvailable /> : autoApply ? "Yes" : "No"}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            {/* Routing state — real values only */}
+            <div className="rounded-xl border border-white/10 bg-black/20 p-5">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                Routing state
+              </div>
+              <dl className="mt-3 space-y-2.5 text-xs">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-white/45">Recommended tier</dt>
+                  <dd className="text-right font-mono text-[11px] text-white/80">
+                    <Value value={tier} />
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-white/45">Over budget</dt>
+                  <dd className="text-white/80">
+                    {overBudget === null ? <NotAvailable /> : overBudget ? "Yes" : "No"}
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-white/45">Conservation mode</dt>
+                  <dd className="text-white/80">
+                    {conservation === null ? (
+                      <NotAvailable />
+                    ) : conservation ? (
+                      "Active"
+                    ) : (
+                      "Inactive"
+                    )}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+
+          {/* The agent's own stated reasoning, rendered verbatim */}
+          <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+              Agent reasoning
+            </div>
+            <p className="mt-2 font-mono text-xs leading-relaxed text-white/70">
+              {reasoning ?? <NotAvailable />}
+            </p>
+          </div>
+        </>
+      )}
     </div>
   );
 }
