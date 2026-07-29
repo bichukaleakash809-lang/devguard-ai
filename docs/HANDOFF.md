@@ -9,167 +9,190 @@ file. Last action — update it.
 
 ## CURRENT TRACK
 
-**T0 — Audit. COMPLETE and approved.**
-**T1 — Build + honesty pass. COMPLETE and verified. Awaiting approval for T2.**
+**T0 — Audit. COMPLETE, approved, pushed.**
+**T1 — Build + honesty pass. COMPLETE, approved, pushed.**
+**T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 
-Do **not** start T2 (SigNoz end to end + the MCP truth decision) until the human
-approves. `docs/04_TRACK_FINAL.md` is **not to be executed** until the human says
-"start the Final Release Track."
+**T2 is NOT fully verified and must not be reported as such.** Four of its seven
+sections are done and evidenced; three cannot be executed in this environment.
+Do **not** start T3 until the human decides how to handle the blocked three.
+
+`docs/04_TRACK_FINAL.md` remains **not to be executed** until the human says so.
 
 ---
 
-## T1 — WHAT WAS DONE (5 phases, one commit each)
+## T2 — WHAT IS DONE (4 phases, each committed and pushed)
 
 | Phase | Commit | Content |
 |---|---|---|
-| 1 | `4ab24ba` | Backend importable without an API key |
-| 2 | `3f885ff` | Nexus panels render real data or N/A; frontend TS errors fixed |
-| 3 | `d7c4aa8` | Honesty pass: real status bar, both `data_source` mislabels fixed |
-| 4 | `4c602d5` | ESLint config, `.env.example`, `.env.local` untracked, `.gitignore` BOM |
-| 5 | *(this commit)* | README / DEMO_SCRIPT honesty pass, `SECURITY.md` filled |
+| 1 | `e0f63ff` | MCP truth decision (§6.5) — branch two, stated honestly |
+| 2 | `91fdccb` + `f3bb8e5` | OTLP pipeline verified end to end (§6.3 partial, §6.4) |
+| 3 | `5e0df5d` | Fail-safe test suite (§6.7) — **and a real defect it found** |
+| 4 | `05fc479` | `otel-collector-config.yaml` (§6.2) |
 
-### The substantive changes
+### §6.5 — the MCP decision: **branch two taken**
 
-- **`groq_client.py`** now builds `AsyncGroq` on first *use*, not at import. The
-  backend previously could not be imported at all without a paid key. A minimal
-  attribute-forwarding proxy keeps `groq_client.chat.completions.create(...)`
-  identical.
-- **`requirements.txt`** gained `opentelemetry-instrumentation-fastapi` and
-  `-logging` (both imported by `main.py`; `-logging` was missing outright,
-  `-fastapi` only arrived transitively via `chromadb`). BOM stripped.
-- **All five Nexus panels rewritten** to read the snake_case shape the backend
-  actually returns. The `{...DEFAULT_DATA, ...data}` merge is gone. New
-  `components/nexus/_shared.tsx` makes fabrication structurally hard: `pick*`
-  helpers return `null` rather than substituting, `<Value>` renders N/A on
-  `null`, `<DataSourceBadge>` surfaces provenance, `<PanelEmptyState>` gives
-  every panel a designed idle and error state.
-- **Two backend LAW 4 breaches fixed.** `CostTrend` now carries an explicit
-  `source` (`signoz_mcp` | `local_shadow`) because `available` only ever meant
-  "safe to use"; and the executive roll-up's provenance is now the weakest of
-  its sections rather than a function of whether anything errored.
-- **`data_source` gained the third value** recommended in `AUDIT.md` §7.5:
-  `live | local_shadow | synthetic | partial`, with a distinct `LOCAL` badge.
+The contract offered "prove a real round trip and keep the claim" or "state
+precisely what happens." Branch one is impossible here (see blockers), so the
+claim is withdrawn. Full reasoning in **`docs/MCP_DECISION.md`**.
 
-### Fabricated values removed
+- `SIGNOZ_MCP_URL` no longer defaults to `http://localhost:8000` — which was
+  **DevGuard's own backend port**. The client was calling DevGuard, getting a
+  404, and falling back. Default is now empty.
+- New `MCPNotConfiguredError`, raised **before any network I/O**.
+- New `capability_report()` reporting `verified_against_real_server: false` and
+  `tool_list: null` — rather than hard-coding tool names nobody has confirmed.
+- New **`GET /telemetry-status`** so the claim is inspectable at runtime.
 
-C1 Grand Finalist badge · C2 "Threats Blocked" random-walk counter · C3
-`moneySavedUsd: 1250` · C4 health score 97% / "cost avoided $1,250" · C5 "View
-GitHub PR #142" · C6 `eval_score 92/100` + latency ticker + 420/180/310ms trace
-spans · C7 "OTel Mesh Connected" · C8 unconditional "Live" pill · C9 benchmark
-strip "92%/88%/95%/5% FPR" · C10 "$85/hour" · C11 alerts described as shipped ·
-C12 "Python 3.12". Also removed: scripted thinking-console narration, the
-courtroom transcript, confidence/trust sparklines, the phone mock, the PDF
-preview.
+### §6.3/§6.4 — real OTLP, verified against decoded protobuf
 
-### Verification (all re-run at end of T1)
+**`scripts/verify_otel.py`** stands up a real OTLP/gRPC receiver, points a real
+backend at it, drives real traffic, and decodes what arrives. Last run:
 
 ```
-import backend.main with GROQ_API_KEY unset  -> PASS
-npx tsc --noEmit                             -> zero errors (was 5)
-npm run build                                -> Compiled successfully, 7/7 pages
-npm run build without .env.local             -> PASS (clean-clone simulation)
-npm run lint                                 -> No ESLint warnings or errors
-docker compose config                        -> valid
-GET  /slo-status                             -> 200
-GET  /audit-log/verify                       -> {"valid":true,"entries_checked":35,"chain intact"}
-POST /god-mode/simulate/error                -> 200  data_source=synthetic
-POST /god-mode/simulate/cost-spike           -> 200  data_source=local_shadow   (was wrongly "live")
-POST /god-mode/simulate/memory-leak          -> 200  data_source=synthetic
-POST /god-mode/simulate/hallucination        -> 200  data_source=synthetic
-POST /god-mode/simulate/god-mode             -> 200  data_source=partial        (was wrongly "live")
+20 spans, 4 log records received over OTLP/gRPC
+resource service.name = "devguard-ai"
+14 parent/child pairs, every one sharing its parent's trace_id
+log<->trace correlation CONFIRMED (trace 362d4f1f801eda77…)
+runs with GROQ_API_KEY unset
 ```
 
-Evidence on disk: `docs/audit-evidence/` (T0 before-state) and
-`docs/audit-evidence/t1-after/` (T1 after-state).
+This **verifies AUDIT.md's rejection of finding A10**: log↔trace correlation was
+implemented, just never verified. It now is.
+
+`--require-agent-spans` additionally drives `POST /scan` and asserts DevGuard's
+own agent spans. **That path is written but has never been run** — it needs a
+live Groq key, which this environment does not have.
+
+### §6.7 — fail-safe tests, and the defect they found
+
+**15 tests, all passing** (`tests/test_telemetry_failsafe.py`) — the first tests
+in this repository. They run with no Groq key, no MCP URL, and the OTLP endpoint
+pointed at the discard port so the failure path is genuinely exercised.
+
+**They found a live production defect.** The suite hung on first run: requests
+were fine, but *process shutdown* blocked forever with an unreachable collector.
+Two causes, both fixed in `backend/core/telemetry.py`:
+
+1. OTLP exporters had no timeout → now `OTEL_EXPORTER_OTLP_TIMEOUT` (default 5s).
+2. **The OTel SDK registers its own `atexit` shutdown hook** which joins the
+   exporter thread unbounded. Even a bounded `shutdown_telemetry()` still hung.
+   All three providers now use `shutdown_on_exit=False`.
+
+Any deployment whose collector went away would have hung on restart or redeploy.
 
 ---
 
-## WHAT IS STILL RED (deliberately out of T1 scope)
+## T2 — WHAT IS STILL OPEN (blocked, with evidence)
 
-| ID | Item | Why deferred |
+| § | Item | Status |
 |---|---|---|
-| B1/B2 | `backend/Dockerfile` copies `requirements.txt` from outside its build context; CMD targets `main:app` instead of `backend.main:app` | **Unverifiable here — there is no Docker daemon.** Fixing it blind would mean claiming a green I cannot demonstrate. Needs a machine with Docker. |
-| A1 | No `frontend/Dockerfile` | Same. |
-| A2 | No `otel-collector-config.yaml` | Belongs with T2 (SigNoz end to end). |
-| B3 | `signoz-system` orphaned gitlink (160000, no `.gitmodules`) | Deleting a tracked path needs explicit approval (contract §6). **See open issue 1.** |
-| A4 | No `LICENSE`; README previously said MIT, contract requires Apache-2.0 | Licence choice is the owner's decision, not mine. **See open issue 2.** |
-| — | Zero tests, no CI, no Makefile | T7. |
-| — | `chromadb` + `sentence-transformers` = 5.4 GiB install | Dependency *removal* needs explicit approval (contract §6). **See open issue 3.** |
-| §3.B | MCP client still targets an invented transport at a non-SigNoz default URL | **This is exactly T2's decision** — prove it or rewrite the claim. Not pre-empted here. |
-| — | Nexus still sends `{}`, so omni_heal/truth_serum can only ever return synthetic | Real streaming + wiring code through is T4. |
+| 6.1 | Stand up SigNoz at a pinned version | **BLOCKED** |
+| 6.3 | One trace visible in the SigNoz UI + screenshot | **BLOCKED** |
+| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **BLOCKED** |
+
+**The blocker is one thing only: container registry egress policy.**
+
+Docker itself is fine — the daemon was not running and **I started it**; it
+works (`Server Version: 29.3.1`). But every registry is refused by the egress
+gateway with `403 to CONNECT`:
+
+```
+production.cloudfront.docker.com      (docker.io)
+pkg-containers.githubusercontent.com  (ghcr.io)
+quay.io
+d2glxqk2uabbnd.cloudfront.net         (public.ecr.aws)
+registry.k8s.io
+ingest.us.signoz.cloud, signoz.io     (SigNoz Cloud — also blocked)
+```
+
+Raw proxy-recorded evidence: **`docs/audit-evidence/t2/registry-egress-block.txt`**
+
+**Smallest fix:** allowlist `registry-1.docker.io`, `auth.docker.io`, and
+`production.cloudfront.docker.com`. Resources are adequate (21 GB disk, 15 GB
+RAM vs SigNoz's ~4–6 GB). Then `docker compose --profile obs up` works
+immediately, since the collector config now exists.
+
+---
+
+## VERIFICATION — full gate, re-run at end of T2
+
+```
+import backend.main with GROQ_API_KEY unset  -> PASS
+pytest                                       -> 15 passed
+scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
+npm run build                                -> Compiled successfully, 7/7 pages
+npm run lint                                 -> No ESLint warnings or errors
+docker compose --profile obs config          -> valid
+```
+
+Evidence on disk: `docs/audit-evidence/t2/` —
+`registry-egress-block.txt`, `telemetry-status-unconfigured.json`,
+`mcp-unconfigured-behaviour.txt`, `otel-verification.json`,
+`pytest-failsafe.txt`, `otel-collector-config-validation.txt`.
 
 ---
 
 ## EXACT NEXT COMMAND
 
-T2 is *"SigNoz proven end to end + the MCP truth decision"*. It cannot start
-until the infrastructure question is answered, because there is no Docker daemon
-in this environment.
-
 ```bash
 git checkout claude/track-t0-audit-evgu8j
 
-# T2 cannot begin until open issue 4 is decided. Once there is a host with a
-# working Docker daemon:
-docker compose --profile obs up -d      # will fail until otel-collector-config.yaml exists (A2)
-# then: emit one span, find it in SigNoz, screenshot it. LAW 5 — prove the
-# capability before building anything on top of it.
+# Re-verify the whole T2 surface at any time:
+python -m pytest
+python scripts/verify_otel.py
+
+# The moment the registry egress policy allows Docker Hub, T2's remaining
+# three sections become executable — the collector config already exists:
+docker compose --profile obs up -d
+docker compose logs otel-collector      # debug exporter shows arriving spans
 ```
 
 ---
 
 ## OPEN ISSUES — NEED A HUMAN DECISION
 
-1. **Delete the `signoz-system` gitlink?** It is an orphaned submodule pointer
-   with no `.gitmodules`, so `git clone --recurse-submodules` errors. Removing a
-   tracked path needs approval per contract §6. Recommend: delete.
-2. **Which licence?** `03_CORE_CONTRACT.md` §2 makes Apache-2.0 a hard T1b item
-   and calls it a binary submission requirement; the README said MIT. I have
-   changed the README to point at `LICENSE` and flagged its absence in
-   Limitations rather than picking for you. Recommend: Apache-2.0.
-3. **Cut `chromadb` + `sentence-transformers`?** 5.4 GiB including the full CUDA
-   toolkit, for optional accelerators behind `try/except` with a working
-   pure-Python fallback. Contract §6 forbids dependency removal without
-   approval. **If you approve, they must be cut *after* the explicit
-   instrumentation pins added in phase 1** — `chromadb` is what was transitively
-   supplying `opentelemetry-instrumentation-fastapi`. Recommend: cut.
-4. **Infrastructure (blocks T2 and T6).** Still unresolved from T0. No Docker
-   daemon here; 15 GiB RAM / 27 GiB disk is below the DataHub + SigNoz +
-   Postgres floor. Options: (a) cloud VM ≥ 32 GiB, (b) never co-run — one stack
-   at a time, (c) managed cloud. Recommend **(b)**.
-5. **Agent roster count.** Unresolved from T0. `03_CORE_CONTRACT.md` §5 says 12,
-   `02_ADDENDUM.md` Part D says 11, `01_PLATFORM_MASTER.md` §6 lists a third set
-   (has `Surgeon`, lacks `Strategist`/`Patchsmith`). Must be settled before any
-   UI renders the number. Recommend 12 including Commander.
-6. **Flagship name.** Unresolved from T0. Recommend **DevGuard Lineage Guard**.
-7. **`DISCLOSURE.md` needs the hackathon-start SHA and the target hackathon.**
-   Both still `<TBD>`. Note `9651db3` (cited in `01_PLATFORM_MASTER.md`) does not
-   exist in this repo. Also: the README targets *Agents of SigNoz* while the
-   contract targets *Build with DataHub* — one must be chosen.
-8. **No Groq API key in this environment.** No live LLM scan has ever been
-   executed. The Scanner's end-to-end path remains unproven, and the T1 work did
-   not change that.
-9. **`git push` is failing with HTTP 403** against the session's git relay
-   (`http://local_proxy@127.0.0.1:41729/...`), across many retries. All T0 and T1
-   commits exist locally and are signed, but **nothing has reached GitHub**. This
-   container is ephemeral. Needs re-authorisation, or an explicit decision to
-   push the files through the GitHub API instead (which would create new commit
-   objects rather than transferring these).
+Blocking first:
+
+1. **Registry egress policy (blocks the rest of T2, and T6/DataHub later).**
+   Allowlist Docker Hub, or accept that §6.1/§6.3/§6.6 stay open and decide
+   whether T2 counts as closed without them. **This is the decision to make.**
+2. **No Groq API key.** No live LLM scan has ever run, in any session. The
+   Scanner's end-to-end path and `verify_otel.py --require-agent-spans` are
+   both unexercised because of it.
+3. **Licence.** `03_CORE_CONTRACT.md` §2 makes Apache-2.0 a hard requirement;
+   README previously said MIT; no `LICENSE` file exists. Owner's call.
+4. **Cut `chromadb` + `sentence-transformers`?** 5.4 GiB including CUDA, for
+   optional accelerators with a working fallback. Needs approval per §6. **Cut
+   them only after the explicit instrumentation pins added in T1 phase 1** —
+   `chromadb` was transitively supplying `opentelemetry-instrumentation-fastapi`.
+5. **Delete the orphaned `signoz-system` gitlink?** No `.gitmodules`, breaks
+   `git clone --recurse-submodules`. Recommend: delete.
+6. **Agent roster count.** Contracts disagree: 12 (`03_CORE_CONTRACT.md` §5),
+   11 (`02_ADDENDUM.md` Part D), and a third set in `01_PLATFORM_MASTER.md` §6.
+   Must be settled before any UI renders it. Recommend 12.
+7. **Flagship name.** Recommend **DevGuard Lineage Guard**.
+8. **`DISCLOSURE.md`** still needs the hackathon-start SHA and the target
+   hackathon (README says *Agents of SigNoz*, contracts say *Build with
+   DataHub*). Note `9651db3` cited in `01_PLATFORM_MASTER.md` does not exist in
+   this repo's history.
 
 ---
 
 ## STANDING RULES (do not relearn these the hard way)
 
 - Never `git push --force`, never rewrite published history, never delete files
-  without approval.
-- Commit and push at every track boundary. Never carry uncommitted work across a
-  session.
-- Never mark your own work green because the code looks correct. Green comes from
-  pasted output. If the five conditions of §3 cannot all be met, the track is
+  without approval. A `git rebase --exec` was run in error during T1 and had to
+  be aborted — **`--exec` is not a dry run.**
+- Commit and push at every phase boundary; verify on GitHub before continuing.
+- Never mark your own work green because the code looks correct. Green comes
+  from pasted output. If §3's five conditions cannot all be met, the track is
   **reported as blocked**, never "complete with a caveat."
-- Large outputs go to disk and are summarised into context.
+- Do not claim a capability in a commit message before implementing it. This
+  happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
+  `f3bb8e5`.
 - Work on branch `claude/track-t0-audit-evgu8j`.
 
 ---
 
-*Last updated: 2026-07-29, end of T1 session.*
+*Last updated: 2026-07-29, end of T2-partial session. HEAD: `05fc479`.*
