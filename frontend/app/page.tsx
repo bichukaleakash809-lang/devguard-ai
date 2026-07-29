@@ -193,22 +193,84 @@ function BootSequence({ onComplete }: { onComplete: () => void }) {
 // Live telemetry header bar
 // ═════════════════════════════════════════════════════════════════════════
 
+// Real platform status, replacing the invented "Threats Blocked" counter and
+// random-walk latency figure that used to live here. Every value below comes
+// from an actual round trip to the backend's /slo-status endpoint, and the
+// measured latency is this browser's real round-trip time for that request.
+// Anything the backend does not report renders N/A. Nothing here is animated
+// into existence.
+
+type BackendState = "checking" | "connected" | "offline";
+
+interface PlatformStatus {
+  state: BackendState;
+  rttMs: number | null;
+  slo: number | null;
+  breaker: string | null;
+}
+
+const STATUS_API =
+  process.env.NEXT_PUBLIC_API_BASE ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 function LiveTelemetryBar() {
   const mounted = useMounted();
-  const [latency, setLatency] = useState(12);
-  const [threats, setThreats] = useState(24059);
+  const [status, setStatus] = useState<PlatformStatus>({
+    state: "checking",
+    rttMs: null,
+    slo: null,
+    breaker: null,
+  });
 
   useEffect(() => {
     if (!mounted) return;
-    const id = setInterval(() => {
-      setLatency((prev) => {
-        const next = prev + (Math.random() * 4 - 2);
-        return Math.min(28, Math.max(7, Math.round(next * 10) / 10));
-      });
-      if (Math.random() < 0.35) setThreats((p) => p + Math.floor(Math.random() * 3) + 1);
-    }, 1000);
-    return () => clearInterval(id);
+    let cancelled = false;
+
+    const check = async () => {
+      const started = performance.now();
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 4000);
+        const res = await fetch(`${STATUS_API}/slo-status`, { signal: controller.signal });
+        clearTimeout(timeout);
+        const rttMs = Math.round(performance.now() - started);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json();
+        if (cancelled) return;
+        setStatus({
+          state: "connected",
+          rttMs,
+          slo: typeof body?.current_compliance_pct === "number" ? body.current_compliance_pct : null,
+          breaker:
+            typeof body?.circuit_breaker?.state === "string" ? body.circuit_breaker.state : null,
+        });
+      } catch {
+        if (cancelled) return;
+        setStatus({ state: "offline", rttMs: null, slo: null, breaker: null });
+      }
+    };
+
+    check();
+    // 15s is frequent enough to feel live without hammering the backend during
+    // a demo. Nothing re-renders between polls.
+    const id = setInterval(check, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [mounted]);
+
+  const dot =
+    status.state === "connected"
+      ? "bg-emerald-400"
+      : status.state === "offline"
+      ? "bg-rose-400"
+      : "bg-slate-500";
+  const word =
+    status.state === "connected"
+      ? "Backend connected"
+      : status.state === "offline"
+      ? "Backend offline"
+      : "Checking backend…";
 
   return (
     <div className="relative z-40 flex-none border-b border-white/[0.06] bg-black/50 backdrop-blur-xl">
@@ -223,23 +285,31 @@ function LiveTelemetryBar() {
         </div>
 
         <div className="hidden items-center gap-6 font-mono text-[11px] text-slate-400 sm:flex">
+          {/* Colour is never the only signal — the word is always present. */}
           <span className="flex items-center gap-1.5">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${dot}`} />
+            {word}
+          </span>
+          <span>
+            Round trip:{" "}
+            <span className="text-cyan-300">
+              {status.rttMs === null ? "N/A" : `${status.rttMs}ms`}
             </span>
-            OTel Mesh Connected
           </span>
           <span>
-            Global Latency: <span className="text-cyan-300">~{latency.toFixed(1)}ms</span>
+            SLO:{" "}
+            <span className="text-emerald-300">
+              {status.slo === null ? "N/A" : `${status.slo.toFixed(1)}%`}
+            </span>
           </span>
           <span>
-            Threats Blocked: <span className="text-emerald-300">{threats.toLocaleString("en-US")}</span>
+            Breaker: <span className="text-slate-300">{status.breaker ?? "N/A"}</span>
           </span>
         </div>
 
         <span className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-          <ShieldCheck className="h-3 w-3" /> Live
+          <ShieldCheck className="h-3 w-3" />
+          {status.state === "connected" ? "Live" : status.state === "offline" ? "Offline" : "…"}
         </span>
       </div>
     </div>
@@ -482,7 +552,7 @@ export default function LandingPage() {
             className="dg-badge inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-1.5 text-[11px] font-medium text-cyan-200"
           >
             <Sparkles className="h-3.5 w-3.5" />
-            SigNoz Hackathon 2026 &middot; Grand Finalist
+            Self-observing AI security pipeline
           </motion.div>
 
           <motion.h1

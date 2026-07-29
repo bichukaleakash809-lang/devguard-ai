@@ -70,9 +70,23 @@ class CostTrend(BaseModel):
     we couldn't parse — callers must treat that as "no signal," not "zero
     cost." Never branch agent behavior on the numeric fields without checking
     `available` first.
+
+    `source` says *where the numbers came from* and is a separate question
+    from whether they are usable:
+
+      - ``"signoz_mcp"``   retrieved from the SigNoz MCP server
+      - ``"local_shadow"`` computed in-process by ``local_telemetry.py`` — real
+                           for this process, but an estimate, and never
+                           retrieved telemetry
+      - ``"unavailable"``  no data
+
+    Callers that render provenance MUST branch on ``source``, not on
+    ``available``. Conflating the two is what previously caused the in-process
+    estimate to be surfaced to users as "live".
     """
 
     available: bool = True
+    source: str = "signoz_mcp"
     window_minutes: int = 0
     total_cost_usd: float = 0.0
     avg_cost_per_request_usd: float = 0.0
@@ -212,6 +226,13 @@ class SignozMCPClient:
             local = get_recent_cost_trend_local(minutes)
             return CostTrend(
                 available=True,
+                # LAW 4: this data is real for this process, but it did NOT come
+                # from SigNoz — it is the in-process estimate from
+                # local_telemetry.py. `available=True` alone previously caused
+                # callers to badge it "live", which is how a local heuristic
+                # ended up presented as retrieved telemetry. `source` is the
+                # field callers must branch on to label provenance.
+                source="local_shadow",
                 window_minutes=minutes,
                 total_cost_usd=local["total_cost_usd"],
                 avg_cost_per_request_usd=local["avg_cost_per_request_usd"],
@@ -316,6 +337,7 @@ class SignozMCPClient:
         avg = (total / count) if count > 0 else 0.0
         return CostTrend(
             available=True,
+            source="signoz_mcp",
             window_minutes=minutes,
             total_cost_usd=total,
             avg_cost_per_request_usd=avg,

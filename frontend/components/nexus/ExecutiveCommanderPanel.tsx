@@ -243,6 +243,16 @@ function SourceTag({ source }: { source: string | null }) {
       </span>
     );
   }
+  if (source === "local_shadow") {
+    return (
+      <span
+        title="Measured in-process by DevGuard, not retrieved from SigNoz"
+        className="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-sky-500/15 text-sky-300"
+      >
+        Local
+      </span>
+    );
+  }
   if (source === "synthetic") {
     return (
       <span className="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-amber-500/15 text-amber-300">

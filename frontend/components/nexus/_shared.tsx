@@ -142,6 +142,19 @@ export function DataSourceBadge({ data, status }: { data: RawResponse; status: P
       </span>
     );
   }
+  if (source === "local_shadow") {
+    // Real measurement of this process, but computed by an in-process
+    // heuristic rather than retrieved from SigNoz. Deliberately not badged
+    // "Live" — that distinction is the whole point of the label.
+    return (
+      <span
+        title="Measured in-process by DevGuard, not retrieved from SigNoz"
+        className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-sky-300"
+      >
+        Local
+      </span>
+    );
+  }
   if (source === "partial") {
     return (
       <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-amber-300">

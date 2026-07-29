@@ -229,7 +229,11 @@ async def execute_finops_agent() -> dict[str, Any]:
         trend = await client.get_recent_cost_trend()
         if trend.available:
             spend_usd = trend.total_cost_usd
-            data_source = "live"
+            # LAW 4: branch on provenance, not on usability. `available` only
+            # says the number is safe to use; `source` says where it came from.
+            # Treating available==True as "live" is what previously badged the
+            # in-process estimate as retrieved SigNoz telemetry.
+            data_source = "live" if trend.source == "signoz_mcp" else "local_shadow"
     except Exception:  # noqa: BLE001
         logger.exception("execute_finops_agent: get_recent_cost_trend() failed; using synthetic spend")
 
@@ -497,6 +501,30 @@ async def generate_executive_summary(
     # ---- Build Slack-style summary text ----
     lines = [f"*DevGuard AI — Executive SRE Summary* ({_now_iso()})"]
 
+    def _rollup_data_source(
+        sections_map: dict[str, Any], omitted: list[str]
+    ) -> str:
+        """Provenance of a composite response = the weakest of its parts.
+
+        A roll-up is only "live" if every section it contains was itself live
+        and nothing was omitted. Any synthetic section makes the whole summary
+        synthetic-tainted, which is what a reader needs to know.
+        """
+        if not sections_map:
+            return "synthetic"
+        labels = {
+            str(payload.get("data_source", "unknown"))
+            for payload in sections_map.values()
+            if isinstance(payload, dict)
+        }
+        if omitted:
+            return "partial"
+        if labels == {"live"}:
+            return "live"
+        if "live" in labels or "local_shadow" in labels:
+            return "partial"
+        return "synthetic"
+
     heal = sections.get("omni_heal")
     if heal:
         lines.append(
@@ -549,7 +577,11 @@ async def generate_executive_summary(
     return {
         "run_id": run_id,
         "module": "executive_sre_commander",
-        "data_source": "live" if not errors and sections else ("synthetic" if not sections else "partial"),
+        # LAW 4: the roll-up's provenance is the *weakest* of its sections, not
+        # a function of whether anything errored. Previously this read "live"
+        # whenever no section raised — so a summary composed entirely of
+        # synthetic sections was still stamped live.
+        "data_source": _rollup_data_source(sections, errors),
         "started_at": _now_iso(),
         "slack_message": slack_message,
         "pdf_outline": pdf_outline,
