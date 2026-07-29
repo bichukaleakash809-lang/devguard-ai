@@ -113,14 +113,32 @@ Verified in both directions — healthy venv exits 0; an interpreter without the
 dependencies names all 8 missing packages and exits 1.
 
 **CI** (`.github/workflows/ci.yml`) — three jobs, no API key, no collector.
-Secret scan is **confirmed green on GitHub**. Backend and frontend job results
-are recorded below once observed; nothing is claimed before then.
+Observed on GitHub, run 3 (`2f5abe8`):
 
-**Note for whoever picks this up: CI install time is a real problem.** The
-backend job's `pip install -r requirements.txt` exceeded 12 minutes on a
-GitHub runner, because of the 5.4 GB chromadb/sentence-transformers/torch tree.
-This is concrete evidence for open issue 4 (cutting them) — it is no longer
-just a clean-clone annoyance, it is a CI cost on every push.
+| Job / step | Result |
+|---|---|
+| Secret scan (history + tracked-env check) | **success** |
+| Frontend — lint, typecheck, build | **success** |
+| Backend — install dependencies | **success, 86 s** (19:20:01 → 19:21:27) |
+| Backend — import without an API key | **success** |
+| Backend — preflight (`make doctor`) | **success** |
+| Backend — tests, OTLP verification | not yet observed |
+
+**CORRECTION.** An earlier version of this file claimed the backend job's pip
+install "exceeded 12 minutes" and cited that as evidence for cutting
+chromadb/sentence-transformers. **That was wrong.** Runs 1 and 2 were cancelled
+by `concurrency: cancel-in-progress` when subsequent commits were pushed
+moments later — run 2's backend job died about 75 seconds in — and the GitHub
+API returned stale `in_progress` status when polled, which was misread as a
+still-running install. The real figure is **86 seconds**, because
+`actions/setup-python` with `cache: pip` restores the wheel cache.
+
+The dependency tree is still 5.4 GB and still worth cutting (open issue 4), but
+on the grounds of clean-clone install size — **not** CI time, which is fine.
+
+**Operational note:** `cancel-in-progress` is correct, but it means pushing
+again while a run is in flight kills it. When a CI result is actually needed,
+push once and wait.
 
 ---
 
