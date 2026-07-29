@@ -1,0 +1,10 @@
+Test suite — post-T2 expansion
+Captured: 2026-07-29T19:13:41Z
+Run with: GROQ_API_KEY unset, SIGNOZ_MCP_URL unset, no collector, no network
+
+tests/test_audit_chain.py: 11
+tests/test_circuit_breaker.py: 12
+tests/test_schema_contracts.py: 20
+tests/test_telemetry_failsafe.py: 15
+
+58 passed, 1 warning in 27.75s
