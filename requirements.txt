@@ -1,4 +1,4 @@
-﻿fastapi==0.104.1
+fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 groq==0.4.2
@@ -9,6 +9,12 @@ python-dotenv==1.0.0
 opentelemetry-api==1.20.0
 opentelemetry-sdk==1.20.0
 opentelemetry-exporter-otlp==1.20.0
+# Imported directly by backend/main.py. Previously absent: -fastapi was only
+# reaching the environment as a transitive dependency of chromadb, and
+# -logging was missing entirely, so `import backend.main` failed on a clean
+# install. Pinned to the 0.41b0 line that matches opentelemetry-* 1.20.0.
+opentelemetry-instrumentation-fastapi==0.41b0
+opentelemetry-instrumentation-logging==0.41b0
 aiohttp==3.9.1
 websockets==12.0
 httpx==0.25.2
