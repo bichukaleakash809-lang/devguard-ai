@@ -25,7 +25,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +120,12 @@ class ScanResult(BaseModel):
     (feature #4) without re-deriving it.
     """
     vulnerabilities: list[Vulnerability] = Field(default_factory=list)
+    # `model_` is a protected namespace in Pydantic v2, which warns on every
+    # import. The field name is part of the public API surface (the frontend
+    # and the audit log both read it), so the namespace is opted out of rather
+    # than renaming the field.
+    model_config = ConfigDict(protected_namespaces=())
+
     model_used: str = Field(..., description="Model string the scanner actually invoked.")
     retrieved_cwe_ids: list[str] = Field(
         default_factory=list,
@@ -147,6 +153,8 @@ class FixResult(BaseModel):
         default_factory=list,
         description="CWE ids this patch claims to remediate. Cross-checked by the Validator.",
     )
+    model_config = ConfigDict(protected_namespaces=())
+
     model_used: str = Field(...)
 
 
