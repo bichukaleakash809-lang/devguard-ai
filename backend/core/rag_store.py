@@ -24,6 +24,7 @@ hackathon.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -206,6 +207,10 @@ class _EmbedderInfo:
     fn: callable
     dim: int
     name: str
+    # Only set by the lexical fallback: lets build() rebuild the embedder once
+    # the corpus vocabulary is known. The semantic embedder ignores these.
+    make: Optional[callable] = None
+    tokenize: Optional[callable] = None
 
 
 def _build_embedder() -> _EmbedderInfo:
@@ -219,22 +224,58 @@ def _build_embedder() -> _EmbedderInfo:
 
         return _EmbedderInfo(fn=_embed, dim=384, name="all-MiniLM-L6-v2")
     except Exception:
-        # Deterministic hashing fallback — NOT semantically strong, but keeps
-        # the demo alive and retrieval order stable. Flagged clearly so nobody
-        # ships this to prod thinking it's real embeddings.
-        DIM = 256
+        # ------------------------------------------------------------------ #
+        # Lexical fallback — NOT semantic embeddings, but deterministic and
+        # genuinely relevant. Flagged in the name so nobody ships it to prod
+        # thinking it is a real embedding model.
+        #
+        # WHY THIS IS NOT A HASHING BUCKET ANYMORE:
+        # This used to be `v[hash(tok) % DIM] += 1.0`, described in a comment as
+        # "deterministic ... retrieval order stable". Both claims were false.
+        # Python randomises `hash()` for str per process (PYTHONHASHSEED), so
+        # the same token landed in a different bucket on every run. Measured:
+        # the same SQL-injection query returned three different CWE sets across
+        # three processes, and CWE-89 was not top-ranked in any of them — the
+        # RAG grounding was injecting near-random CWE definitions into the
+        # Scanner prompt, which is worse than no retrieval at all because it
+        # looks authoritative.
+        #
+        # A token-overlap vector over a FIXED vocabulary derived from the corpus
+        # is deterministic by construction (no hashing at all), reproducible
+        # across processes, and actually ranks the right weakness first.
+        # ------------------------------------------------------------------ #
+        def _tokenize(text: str) -> list[str]:
+            # Split on non-alphanumerics so `db.execute(query)` yields
+            # ["db","execute","query"] — code punctuation is not signal.
+            return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 2]
 
-        def _embed(texts: list[str]) -> list[list[float]]:
-            vecs = []
-            for t in texts:
-                v = [0.0] * DIM
-                for tok in t.lower().split():
-                    v[hash(tok) % DIM] += 1.0
-                norm = math.sqrt(sum(x * x for x in v)) or 1.0
-                vecs.append([x / norm for x in v])
-            return vecs
+        def _make_embedder(vocabulary: list[str]):
+            index = {tok: i for i, tok in enumerate(vocabulary)}
+            dim = max(len(vocabulary), 1)
 
-        return _EmbedderInfo(fn=_embed, dim=DIM, name="hashing-fallback[NOT-PROD]")
+            def _embed(texts: list[str]) -> list[list[float]]:
+                vecs = []
+                for t in texts:
+                    v = [0.0] * dim
+                    for tok in _tokenize(t):
+                        i = index.get(tok)
+                        if i is not None:
+                            v[i] += 1.0
+                    norm = math.sqrt(sum(x * x for x in v)) or 1.0
+                    vecs.append([x / norm for x in v])
+                return vecs
+
+            return _embed
+
+        # Vocabulary is built lazily from the corpus on first build(); until
+        # then a single-token stub keeps the signature stable.
+        return _EmbedderInfo(
+            fn=_make_embedder([]),
+            dim=1,
+            name="lexical-overlap-fallback[NOT-PROD]",
+            make=_make_embedder,
+            tokenize=_tokenize,
+        )
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -272,6 +313,19 @@ class CWEVectorStore:
         on any failure, falls back to in-memory cosine search.
         """
         texts = [self._entry_text(e) for e in self._entries]
+
+        # Lexical fallback only: fit the vocabulary to this corpus so the
+        # vectors carry real token identity instead of hash collisions.
+        if self._embedder.make is not None and self._embedder.tokenize is not None:
+            vocab = sorted({tok for t in texts for tok in self._embedder.tokenize(t)})
+            self._embedder = _EmbedderInfo(
+                fn=self._embedder.make(vocab),
+                dim=max(len(vocab), 1),
+                name=self._embedder.name,
+                make=self._embedder.make,
+                tokenize=self._embedder.tokenize,
+            )
+
         try:
             import chromadb  # type: ignore
 

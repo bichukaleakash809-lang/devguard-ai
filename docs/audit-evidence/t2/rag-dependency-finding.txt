@@ -1,0 +1,35 @@
+RAG dependency finding — both heavy optional backends are unusable
+Captured: 2026-07-29T23:52:43Z
+Environment: clean venv from requirements.txt as committed (5.4 GiB installed)
+
+requirements.txt pins:
+  chromadb==0.4.24
+  sentence-transformers==2.2.2
+  # reaching the environment as a transitive dependency of chromadb, and
+
+Resolved transitive versions:
+  Name: sentence-transformers	Version: 2.2.2
+  Name: huggingface_hub	Version: 0.36.2
+  Name: chromadb	Version: 0.4.24
+  Name: numpy	Version: 2.4.6
+
+--- 1. sentence-transformers cannot be imported ---
+      from huggingface_hub import HfApi, HfFolder, Repository, hf_hub_url, cached_download
+  ImportError: cannot import name 'cached_download' from 'huggingface_hub' (/tmp/claude-0/-home-user-devguard-ai/85f1cfaa-c9ab-5688-aaf9-82fe91ede3f5/scratchpad/venv/lib/python3.11/site-packages/huggingface_hub/__init__.py)
+
+--- 2. chromadb cannot be imported ---
+      raise AttributeError(
+  AttributeError: `np.float_` was removed in the NumPy 2.0 release. Use `np.float64` instead.
+
+CONSEQUENCE
+  Both 'preferred' RAG backends fail at import, so CWEVectorStore always
+  lands on its pure-Python fallback. The 5.4 GiB of torch/CUDA pulled in by
+  these two pins buys nothing at runtime — neither package can be loaded.
+
+  This is a dependency-pin incompatibility, NOT an egress problem:
+    - huggingface_hub removed cached_download after 0.25; st 2.2.2 imports it
+    - numpy 2.x removed np.float_; chromadb 0.4.24 uses it
+
+  Fixing it means repinning or removing the two packages, which is a
+  dependency change and needs explicit approval per docs/03_CORE_CONTRACT.md §6.
+  Recorded as open issue 4 in docs/HANDOFF.md.

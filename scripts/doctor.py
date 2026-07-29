@@ -200,6 +200,50 @@ def check_files() -> None:
              "Tracked as an open decision in docs/HANDOFF.md.")
 
 
+def check_rag_backend() -> None:
+    """Report which retrieval backend is ACTUALLY active, not which is pinned.
+
+    requirements.txt pins chromadb and sentence-transformers as the preferred
+    backends, but both currently fail to import against the versions pip
+    resolves (see docs/audit-evidence/t2/rag-dependency-finding.txt). The store
+    then silently falls back to pure Python. "Silently" is the problem: a
+    reviewer would reasonably assume the 5.4 GiB of torch on disk is being
+    used. This surfaces the truth.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from backend.core.rag_store import get_store;"
+            "s = get_store();"
+            "print(s.backend + '|' + s._embedder.name)",
+        ],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), env=env, timeout=180,
+    )
+    if proc.returncode != 0:
+        fail(
+            "RAG store",
+            (proc.stderr.strip().splitlines() or ["failed to build"])[-1],
+            "The Scanner cannot retrieve CWE context. Run `pip install -r requirements.txt`.",
+        )
+        return
+
+    backend, _, embedder = proc.stdout.strip().partition("|")
+    if "NOT-PROD" in embedder:
+        warn(
+            "RAG backend",
+            f"{backend} / {embedder}",
+            "Pure-Python fallback is active — the pinned chromadb and "
+            "sentence-transformers backends are not importable. Deterministic "
+            "and relevant, but not semantic embeddings. See "
+            "docs/audit-evidence/t2/rag-dependency-finding.txt",
+        )
+    else:
+        ok("RAG backend", f"{backend} / {embedder}")
+
+
 def check_reachability() -> None:
     import urllib.error
     import urllib.request
@@ -229,6 +273,7 @@ def main() -> int:
     check_backend_imports()
     check_env_vars()
     check_files()
+    check_rag_backend()
     check_reachability()
 
     width = max(len(n) for _, n, _, _ in results) + 2
