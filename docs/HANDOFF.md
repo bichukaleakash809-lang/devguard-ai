@@ -12,6 +12,7 @@ file. Last action — update it.
 **T0 — Audit. COMPLETE, approved, pushed.**
 **T1 — Build + honesty pass. COMPLETE, approved, pushed.**
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
+**Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
@@ -80,6 +81,46 @@ Two causes, both fixed in `backend/core/telemetry.py`:
    All three providers now use `shutdown_on_exit=False`.
 
 Any deployment whose collector went away would have hung on restart or redeploy.
+
+---
+
+## POST-T2 HARDENING (work that does not depend on the blocked registry)
+
+| Commit | Content |
+|---|---|
+| `2452500` | Test suite expanded 15 -> 58 |
+| `4cf03d2` | `make doctor` preflight + Makefile |
+| `bf05d2d` | CI workflow (lint, typecheck, tests, OTLP verification, secret scan) |
+| `2ff27c4` | Pydantic protected-namespace warning silenced |
+
+**Tests: 58 passing**, all with no API key, no collector, no network.
+- `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
+  bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
+  length, no raw dicts across boundaries, empty code rejected before any LLM call
+- `test_audit_chain.py` (11) — tamper-evidence *demonstrated*, not asserted.
+  In-place edit, code_hash swap, deletion, reordering and forged append are all
+  caught. The key one: an attacker who recomputes the edited record's own hash
+  defeats the per-record check but not the link check.
+- `test_circuit_breaker.py` (12) — the real state machine, CLOSED → OPEN →
+  HALF_OPEN → CLOSED, including that an OPEN breaker does not invoke the
+  callable at all, and that a ValueError from our own code does not consume the
+  outage budget
+- `test_telemetry_failsafe.py` (15) — from T2 phase 3
+
+**`make doctor`** (contract §4.3) reports what it observed, distinguishes
+OPTIONAL from MISSING, and exits 0 only when every required check passes.
+Verified in both directions — healthy venv exits 0; an interpreter without the
+dependencies names all 8 missing packages and exits 1.
+
+**CI** (`.github/workflows/ci.yml`) — three jobs, no API key, no collector.
+Secret scan is **confirmed green on GitHub**. Backend and frontend job results
+are recorded below once observed; nothing is claimed before then.
+
+**Note for whoever picks this up: CI install time is a real problem.** The
+backend job's `pip install -r requirements.txt` exceeded 12 minutes on a
+GitHub runner, because of the 5.4 GB chromadb/sentence-transformers/torch tree.
+This is concrete evidence for open issue 4 (cutting them) — it is no longer
+just a clean-clone annoyance, it is a CI cost on every push.
 
 ---
 
@@ -195,4 +236,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-29, end of T2-partial session. HEAD: `05fc479`.*
+*Last updated: 2026-07-29, post-T2 hardening. HEAD: `2ff27c4`.*
