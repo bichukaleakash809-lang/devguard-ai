@@ -96,6 +96,41 @@ Any deployment whose collector went away would have hung on restart or redeploy.
 | `0ab21d2` | CI confirmed green end to end; badge added |
 | `1133985` | Frontend error surfaces (§4.5) — approval gate no longer fails silently |
 | `fcfbaaf` | Security: untrusted-content boundary at every agent prompt |
+| `cda9d78` | Docs accuracy: removed statements no longer true; DEPLOYMENT.md status banner |
+| `9716701` | **RAG: fixed non-deterministic retrieval + found both heavy backends are dead** |
+
+**Tests now 83.**
+
+### RAG — two real defects (commit `9716701`)
+
+**1. Retrieval was non-reproducible and irrelevant.** The fallback embedder used
+`v[hash(tok) % DIM] += 1.0`, commented as "deterministic ... retrieval order
+stable". Python randomises `hash()` for `str` per process, so three processes
+gave three different CWE sets for the same SQL snippet, CWE-89 top-ranked in
+none. Those results are injected into the Scanner prompt as "RELEVANT SECURITY
+KNOWLEDGE (retrieved)" — so it was feeding near-random CWE definitions to the
+model as authoritative. Replaced with a corpus-fitted token-overlap vector: no
+hashing, determinism is structural. Correct CWE now ranks first for command
+injection, weak hash and weak PRNG; CWE-89 top-3 for SQL.
+
+**2. Neither pinned RAG backend can be imported.** On a clean install from
+`requirements.txt` as committed:
+
+```
+sentence-transformers==2.2.2 -> ImportError: cannot import name 'cached_download'
+                                from 'huggingface_hub' (0.36.2 removed it)
+chromadb==0.4.24            -> AttributeError: np.float_ was removed in NumPy 2.0
+                                (numpy 2.4.6 installed)
+```
+
+So the fallback is **always** what runs, and the 5.4 GiB of torch/CUDA buys
+nothing. A pin incompatibility, not egress. Evidence:
+`docs/audit-evidence/t2/rag-dependency-finding.txt`. **Not actioned** — repinning
+or removing dependencies needs approval per §6. This is now the strongest
+argument for open issue 4.
+
+`make doctor` reports the *actually active* retrieval backend so this cannot
+hide again.
 
 **Tests now 70.** CI run #5 on `0ab21d2` = `success` (all three jobs).
 
