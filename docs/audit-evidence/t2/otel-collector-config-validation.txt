@@ -1,0 +1,19 @@
+T2 phase 4 — otel-collector-config.yaml validation
+Captured: 2026-07-29T15:34:36Z
+
+WHAT WAS VERIFIED (structural only):
+  YAML parses: yes
+  top-level sections: ['exporters', 'extensions', 'processors', 'receivers', 'service']
+  pipeline traces: every referenced component is defined -> True
+  pipeline metrics: every referenced component is defined -> True
+  pipeline logs: every referenced component is defined -> True
+  service.extensions resolve: True
+
+  docker compose --profile obs config -> valid (mount target now exists)
+
+WHAT WAS *NOT* VERIFIED:
+  The collector has NEVER been started with this config. The image
+  otel/opentelemetry-collector-contrib:0.96.0 cannot be pulled here —
+  every registry is refused by the egress policy. See
+  registry-egress-block.txt in this directory.
+  'It starts cleanly' remains an UNVERIFIED claim.
