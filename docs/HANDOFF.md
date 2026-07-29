@@ -122,7 +122,11 @@ Observed on GitHub, run 3 (`2f5abe8`):
 | Backend — install dependencies | **success, 86 s** (19:20:01 → 19:21:27) |
 | Backend — import without an API key | **success** |
 | Backend — preflight (`make doctor`) | **success** |
-| Backend — tests, OTLP verification | not yet observed |
+| Backend — tests (58), OTLP verification | **success** |
+
+**Run 3 overall conclusion: `success`.** All three jobs green — the first
+complete CI run. Run URL:
+https://github.com/akashbichukale111/devguard-ai/actions/runs/30483894329
 
 **CORRECTION.** An earlier version of this file claimed the backend job's pip
 install "exceeded 12 minutes" and cited that as evidence for cutting

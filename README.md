@@ -1,5 +1,7 @@
 # 🛡️ DevGuard AI
 
+[![CI](https://github.com/akashbichukale111/devguard-ai/actions/workflows/ci.yml/badge.svg?branch=claude/track-t0-audit-evgu8j)](https://github.com/akashbichukale111/devguard-ai/actions/workflows/ci.yml)
+
 **DevGuard doesn't just get observed — it observes itself, and adapts.**
 
 An autonomous, self-healing AI security pipeline that scans code for vulnerabilities, fixes them through a Scanner → Fixer → Validator reflection loop, and — uniquely — **queries its own SigNoz telemetry (via MCP) to change its own runtime behavior**, not just to fill a dashboard for a human to read later.
