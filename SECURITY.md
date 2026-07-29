@@ -49,10 +49,19 @@ These are real and should be treated as open:
   target.
 - **Submitted code is sent to a third party.** Anything pasted into the Scanner
   is transmitted to Groq. Do not submit proprietary or sensitive source.
-- **Prompt injection is not defended against.** Code under review is untrusted
-  input that reaches the model, and there is currently no fencing or screening
-  layer between the two. A crafted snippet may be able to influence agent
-  output. This is the most significant open issue in this list.
+- **Prompt injection is mitigated, not solved.** Code under review is untrusted
+  input that reaches the model. There is now an explicit boundary at every agent
+  prompt: each system prompt carries `UNTRUSTED_CONTENT_RULE` declaring fenced
+  content to be data rather than instruction, and `fence_untrusted()` wraps that
+  content in sentinel markers (rather than a ``` block, which untrusted code can
+  close early to break out). The Fixer's own free-text output is fenced too,
+  since it is model-generated from untrusted input and inherits that taint.
+  Asserted by `tests/test_prompt_injection_boundary.py`.
+
+  **This raises the cost of an injection; it does not make one impossible.** No
+  prompt-level defence does. The residual risk is a false negative — an attacker
+  talking the Scanner out of reporting a finding — and it is not eliminated.
+  A determined attacker with knowledge of the prompt may still succeed.
 - **Docker images do not build**, so the non-root user and the reduced attack
   surface described in `backend/Dockerfile` are not actually in effect anywhere.
 - **No test suite and no CI**, so none of the above is regression-protected.
