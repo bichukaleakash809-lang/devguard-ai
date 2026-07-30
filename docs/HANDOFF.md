@@ -98,8 +98,30 @@ Any deployment whose collector went away would have hung on restart or redeploy.
 | `fcfbaaf` | Security: untrusted-content boundary at every agent prompt |
 | `cda9d78` | Docs accuracy: removed statements no longer true; DEPLOYMENT.md status banner |
 | `9716701` | **RAG: fixed non-deterministic retrieval + found both heavy backends are dead** |
+| `0a7341d` | **Pipeline: clean-code short-circuit; removed fake SigNoz log claims** |
 
-**Tests now 83.**
+### Pipeline — two real defects (commit `0a7341d`)
+
+**1. The reflection loop ran on clean code.** `run_pipeline` entered the
+Fixer→Validator loop regardless of whether the Scanner reported anything. On
+clean input that is up to **6 paid LLM calls**, with the Fixer told to "harden
+defensively" code that had no findings — rewriting correct code, then grading
+the rewrite. Not hypothetical: `benchmark.py` ships a negative control.
+Fixed with a short-circuit; `final_validation` is **None** rather than a
+synthesised pass, because no Validator ran and there is no honest `eval_score`
+to invent. `PipelineResult.final_fix/final_validation` became `Optional`, which
+matches how `router.py` already read them (every access was `getattr(..., None)`).
+
+**2. Self-observation logs asserted a SigNoz MCP round trip.** Six statements
+read "Querying SigNoz MCP Server..." / "SigNoz MCP Server reports...". No MCP
+server is configured or has ever been contacted — and these records are exported
+over OTLP, so they land **in SigNoz** asserting the round trip. Rewritten to name
+the real source; a test guards the string from returning.
+
+Evidence: `docs/audit-evidence/t2/pipeline-defects.txt` (includes the pre-fix
+failing test output).
+
+**Tests now 94.** CI run #5 on `0ab21d2` = `success` (all three jobs).
 
 ### RAG — two real defects (commit `9716701`)
 
@@ -132,8 +154,6 @@ argument for open issue 4.
 `make doctor` reports the *actually active* retrieval backend so this cannot
 hide again.
 
-**Tests now 70.** CI run #5 on `0ab21d2` = `success` (all three jobs).
-
 **§4.5 error-surface audit — done.** All 7 frontend `catch` blocks audited. Two
 were swallowing failures, both in `app/result/page.tsx`: the approval gate
 rolled back silently (a user clicking "Approve fix" on a critical finding saw
@@ -151,7 +171,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 70 passing**, all with no API key, no collector, no network:
+**Test inventory — 94 passing**, all with no API key, no collector, no network:
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
   bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
   length, no raw dicts across boundaries, empty code rejected before any LLM call
@@ -165,6 +185,11 @@ false-negative risk is real and stated.
   outage budget
 - `test_telemetry_failsafe.py` (15) — T2 §6.7, plus the shutdown-hang defect
 - `test_prompt_injection_boundary.py` (12) — the untrusted-content boundary
+- `test_rag_store.py` (13) — retrieval determinism + relevance, incl. a
+  source-level guard that builtin `hash()` never returns
+- `test_pipeline_loop.py` (11) — the reflection loop: convergence, retry with
+  feedback threaded, exhaustion, both gate conditions independently, the `>=`
+  boundary, and the clean-code short-circuit
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
