@@ -1,6 +1,38 @@
-fastapi==0.104.1
+# fastapi is held at 0.136.0 DELIBERATELY, not out of neglect. Read this before
+# bumping it.
+#
+# 0.141.1 (the latest at time of writing) introduces `_IncludedRouter` in
+# fastapi/routing.py, a route type that lands in `app.routes` when you call
+# `app.include_router()` — which backend/main.py does twice. The pinned
+# `opentelemetry-instrumentation-fastapi==0.41b0` iterates `app.routes` and reads
+# `.path` off every entry, and `_IncludedRouter` has no `.path`:
+#
+#     AttributeError: '_IncludedRouter' object has no attribute 'path'
+#     opentelemetry/instrumentation/fastapi/__init__.py:337
+#
+# That is not a test-only problem. Measured against a real uvicorn: every request
+# returns HTTP 500. 0.136.0 is the newest release that does NOT define
+# `_IncludedRouter` while still allowing `starlette>=0.46.0` unbounded — so it
+# reaches a fully patched starlette without needing the whole OTel stack (5 pins)
+# upgraded alongside. Bumping fastapi past 0.136.0 therefore requires upgrading
+# opentelemetry-instrumentation-fastapi in the same commit, and re-running
+# scripts/verify_otel.py to prove the instrumentation still works.
+fastapi==0.136.0
+
+# starlette is pinned EXPLICITLY even though fastapi pulls it in. fastapi 0.104.1
+# constrained it to `<0.28.0,>=0.27.0`, so it was effectively pinned by proxy;
+# 0.136.0 asks only for `>=0.46.0`, unbounded, which would leave the package that
+# carries the advisories free to drift on any future install. 1.3.1 is the lowest
+# version that clears all seven starlette advisories — PYSEC-2026-249 is fixed
+# only in 1.3.1.
+starlette==1.3.1
+
 uvicorn[standard]==0.24.0
-pydantic==2.5.0
+# pydantic 2.5.0 cannot satisfy fastapi 0.136.0, which requires >=2.9.0. This is
+# the only other pin the fastapi bump forces. `anyio==3.7.1` below was checked and
+# does NOT need to move: it was capped at <4 by fastapi 0.104.1, and 0.136.0
+# accepts it unchanged.
+pydantic==2.13.4
 groq==0.4.2
 chromadb==0.4.24
 sentence-transformers==2.2.2

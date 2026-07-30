@@ -1,6 +1,6 @@
 {
-  "captured_at": "2026-07-30T12:00:39Z",
-  "otlp_endpoint": "http://127.0.0.1:33979",
+  "captured_at": "2026-07-30T12:10:53Z",
+  "otlp_endpoint": "http://127.0.0.1:54113",
   "groq_api_key_set": false,
   "agent_spans_required": false,
   "traffic": [
@@ -33,85 +33,85 @@
     {
       "parent": "GET /slo-status",
       "child": "GET /slo-status http send",
-      "trace_id": "d1d6caaa117a1e1000e4529dae28b8bd",
+      "trace_id": "48bd9785ec0d26d15a48837e60f08c4b",
       "same_trace": true
     },
     {
       "parent": "GET /slo-status",
       "child": "GET /slo-status http send",
-      "trace_id": "d1d6caaa117a1e1000e4529dae28b8bd",
+      "trace_id": "48bd9785ec0d26d15a48837e60f08c4b",
       "same_trace": true
     },
     {
       "parent": "GET /slo-status",
       "child": "GET /slo-status http send",
-      "trace_id": "8ef0d11f2bf66801b9292214a3385cd2",
+      "trace_id": "ed9b1d6508143b2dfc59e7b71082d7b8",
       "same_trace": true
     },
     {
       "parent": "GET /slo-status",
       "child": "GET /slo-status http send",
-      "trace_id": "8ef0d11f2bf66801b9292214a3385cd2",
+      "trace_id": "ed9b1d6508143b2dfc59e7b71082d7b8",
       "same_trace": true
     },
     {
       "parent": "GET /audit-log/verify",
       "child": "GET /audit-log/verify http send",
-      "trace_id": "11b161a893d9b809481d5447b96083c9",
+      "trace_id": "fe30903e405e763e7f5d861b9cbd7030",
       "same_trace": true
     },
     {
       "parent": "GET /audit-log/verify",
       "child": "GET /audit-log/verify http send",
-      "trace_id": "11b161a893d9b809481d5447b96083c9",
+      "trace_id": "fe30903e405e763e7f5d861b9cbd7030",
       "same_trace": true
     },
     {
       "parent": "GET /telemetry-status",
       "child": "GET /telemetry-status http send",
-      "trace_id": "76731b842812269f950fa5ee460b48bf",
+      "trace_id": "3bb42c10724f5e032dfb8f69432a8f3a",
       "same_trace": true
     },
     {
       "parent": "GET /telemetry-status",
       "child": "GET /telemetry-status http send",
-      "trace_id": "76731b842812269f950fa5ee460b48bf",
+      "trace_id": "3bb42c10724f5e032dfb8f69432a8f3a",
       "same_trace": true
     },
     {
       "parent": "POST /god-mode/simulate/error",
       "child": "POST /god-mode/simulate/error http receive",
-      "trace_id": "8b08b137bfe6cc04dcdc39fc4ba6cb31",
+      "trace_id": "eed5aed6cde10ba1f9e6ea02c2bf5adf",
       "same_trace": true
     },
     {
       "parent": "POST /god-mode/simulate/error",
       "child": "POST /god-mode/simulate/error http send",
-      "trace_id": "8b08b137bfe6cc04dcdc39fc4ba6cb31",
+      "trace_id": "eed5aed6cde10ba1f9e6ea02c2bf5adf",
       "same_trace": true
     },
     {
       "parent": "POST /god-mode/simulate/error",
       "child": "POST /god-mode/simulate/error http send",
-      "trace_id": "8b08b137bfe6cc04dcdc39fc4ba6cb31",
+      "trace_id": "eed5aed6cde10ba1f9e6ea02c2bf5adf",
       "same_trace": true
     },
     {
       "parent": "POST /god-mode/simulate/cost-spike",
       "child": "POST /god-mode/simulate/cost-spike http receive",
-      "trace_id": "179b29e732bfd18b40675a182edad2ef",
+      "trace_id": "54a0b07630679796bbeccd58f6a39dac",
       "same_trace": true
     },
     {
       "parent": "POST /god-mode/simulate/cost-spike",
       "child": "POST /god-mode/simulate/cost-spike http send",
-      "trace_id": "179b29e732bfd18b40675a182edad2ef",
+      "trace_id": "54a0b07630679796bbeccd58f6a39dac",
       "same_trace": true
     },
     {
       "parent": "POST /god-mode/simulate/cost-spike",
       "child": "POST /god-mode/simulate/cost-spike http send",
-      "trace_id": "179b29e732bfd18b40675a182edad2ef",
+      "trace_id": "54a0b07630679796bbeccd58f6a39dac",
       "same_trace": true
     }
   ],
@@ -121,8 +121,8 @@
     {
       "body": "SignozMCPClient.get_recent_cost_trend: SigNoz/MCP unavailable (SIGNOZ_MCP_URL is not set \u2014 no SigNoz MCP server to query. This is the expected state until the integration is verified.); falling back to local in-process cost telemetry. Result is labelled source='local_shadow', never 'live'.",
       "severity": "INFO",
-      "trace_id": "179b29e732bfd18b40675a182edad2ef",
-      "span_id": "50154ebc46ddc873"
+      "trace_id": "54a0b07630679796bbeccd58f6a39dac",
+      "span_id": "6d29c8fe2983ab0a"
     }
   ],
   "failures": [],

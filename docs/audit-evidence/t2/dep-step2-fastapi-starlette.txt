@@ -1,0 +1,115 @@
+STEP 2 OF APPROVED DEPENDENCY MAINTENANCE — FastAPI / Starlette
+==============================================================
+Goal: reach a starlette version that clears the advisories, in particular the
+two I had triaged as GENUINELY REACHABLE (PYSEC-2026-161 and -248, the
+request.url reconstruction pair). Those are fixed in 1.0.1 and 1.3.0
+respectively, and PYSEC-2026-249 needs 1.3.1 — so 1.3.1 is the target.
+
+WHAT MOVED, AND WHY EACH ONE HAD TO
+-----------------------------------
+  fastapi   0.104.1 -> 0.136.0   the only way to reach starlette 1.x: 0.104.1
+                                 constrains it to <0.28.0
+  starlette 0.27.0  -> 1.3.1     the actual objective; now pinned EXPLICITLY
+  pydantic  2.5.0   -> 2.13.4    forced — fastapi 0.136.0 requires >=2.9.0
+
+WHAT DID *NOT* HAVE TO MOVE, verified rather than assumed
+---------------------------------------------------------
+  anyio    3.7.1   pip resolves fastapi 0.136.0 + anyio==3.7.1 with no conflict.
+                   The pin existed because fastapi 0.104.1 capped it at <4.0.0;
+                   0.136.0 accepts 3.7.1 unchanged. Left alone.
+  uvicorn  0.24.0  does not import starlette. Left alone.
+  the five opentelemetry-* pins   left alone — see the next section for why that
+                   required choosing fastapi 0.136.0 over the latest.
+
+A REAL REGRESSION FOUND AND AVOIDED — why NOT the latest fastapi
+----------------------------------------------------------------
+The obvious move was fastapi 0.141.1 (latest). It BREAKS THE APPLICATION:
+
+    AttributeError: '_IncludedRouter' object has no attribute 'path'
+    opentelemetry/instrumentation/fastapi/__init__.py:337
+
+Measured, not inferred. Against a real uvicorn on the upgraded stack:
+
+    GET /slo-status -> HTTP 500
+    server log      -> AttributeError: '_IncludedRouter' object has no attribute 'path'
+
+and 12 of 301 tests failed.
+
+Diagnosis. `_IncludedRouter` is defined in **fastapi/routing.py:1586**, NOT in
+starlette — I initially misread this as a starlette incompatibility and checked.
+fastapi 0.141.1 puts an `_IncludedRouter` into `app.routes` when you call
+`app.include_router()`, which backend/main.py does twice. The pinned
+`opentelemetry-instrumentation-fastapi==0.41b0` iterates `app.routes` and reads
+`.path` off every entry; `_IncludedRouter` has none. Every instrumented request
+500s.
+
+Confirmed it was not starlette by testing fastapi 0.141.1 + starlette 0.47.2 —
+same AttributeError, same HTTP 500.
+
+Bisected fastapi by reading each wheel's own routing.py and METADATA:
+
+    fastapi 0.115.6   _IncludedRouter=False   starlette<0.42.0,>=0.40.0
+    fastapi 0.128.0   _IncludedRouter=False   starlette<0.51.0,>=0.40.0
+    fastapi 0.136.0   _IncludedRouter=False   starlette>=0.46.0      <-- chosen
+    fastapi 0.141.1   _IncludedRouter=True    starlette>=0.46.0      <-- breaks OTel
+
+0.136.0 is the newest release that does NOT define `_IncludedRouter` while still
+allowing starlette unbounded above — so it reaches 1.3.1 WITHOUT dragging the
+five opentelemetry-* pins along. Upgrading those was never approved, and it would
+put scripts/verify_otel.py — the project's central piece of verification evidence
+— at risk in the same commit.
+
+WHY starlette IS NOW PINNED EXPLICITLY
+--------------------------------------
+fastapi 0.104.1 constrained it to `<0.28.0,>=0.27.0`, so it was effectively
+pinned by proxy. fastapi 0.136.0 asks only for `>=0.46.0`, unbounded — which
+would leave the package carrying the advisories free to drift to a future
+starlette 2.x on any fresh install. Pinning 1.3.1 preserves the reproducibility
+property the file already had.
+
+BEHAVIOUR — verified identical on the new stack
+----------------------------------------------
+  full test suite                        301 passed  (unchanged)
+  import backend.main, GROQ_API_KEY unset  OK
+  scripts/verify_otel.py                   exit 0 — PASSED: OTLP export,
+    trace context propagation and log<->trace correlation all verified
+    against decoded protobuf. This is the test that would catch an OTel
+    instrumentation break, and it passes.
+  scripts/doctor.py                        exit 0
+
+  every endpoint, against a real uvicorn:
+    GET  /slo-status                       200
+    GET  /audit-log/verify                 200
+    GET  /audit-log?limit=3                200
+    GET  /telemetry-status                 200
+    POST /god-mode/simulate/error          200
+    POST /god-mode/simulate/cost-spike     200
+    POST /god-mode/simulate/memory-leak    200
+    POST /god-mode/simulate/hallucination  200
+    POST /god-mode/simulate/god-mode       200
+    WS   /ws/scan/{id}  -> {'scan_id': 'test-scan', 'status': 'subscribed'}
+
+  error contract intact (starlette 1.x changed request handling internals):
+    oversized body (50,001 chars)          422   not 500
+    unknown scan_id                        404
+
+ADVISORY COUNT — measured at each step
+-------------------------------------
+  original:  Found 56 known vulnerabilities in 7 packages
+  step 1:    Found 18 known vulnerabilities in 6 packages
+  step 2:    Found 8 known vulnerabilities in 4 packages
+
+  package            orig  step1  step2
+  aiohttp              38      0      0
+  fastapi               1      1      0
+  protobuf              1      1      1
+  pytest                1      1      1
+  python-dotenv         1      1      1
+  starlette             9      9      0
+  transformers          5      5      5
+
+  All 9 starlette report lines (7 unique advisories) and the fastapi one are
+  cleared. The 8 remaining are transformers (5), protobuf, pytest and
+  python-dotenv (1 each) — every one triaged as unreachable in
+  python-dependency-advisories.txt, and transformers arrives via
+  sentence-transformers, which is HANDOFF open issue 4 and not approved.

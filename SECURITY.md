@@ -140,19 +140,20 @@ go red again on any upstream publication against a pinned version — a failure
 with no code change behind it. **Do not read a green tick on that job as "no
 advisories" — read the report.**
 
-### Python dependency advisories — 56 → 18, and the rest triaged
+### Python dependency advisories — 56 → 8, and the rest triaged
 
 `requirements.txt` had never been audited. `pip-audit` reported **56 known
-vulnerabilities in 7 packages**. **Now 18 in 6**, after removing a redundant
-`aiohttp==3.9.1` pin with owner approval — see below. Triaged per advisory against
-this codebase rather than reported as a count:
+vulnerabilities in 7 packages**. **Now 8 in 4**, after two approved changes:
+removing a redundant `aiohttp` pin, then moving FastAPI/Starlette to a patched
+pairing. Triaged per advisory against this codebase rather than reported as a
+count:
 
 | Package | Pinned | Advisories | Reachable here? |
 |---|---|---|---|
 | ~~`aiohttp`~~ | *unpinned* | ~~30~~ **0** | **Fixed.** The pin could never have removed the package — it arrives transitively via `chromadb → kubernetes → aiohttp<4.0.0,>=3.9.0`. All the pin did was hold a dependency nothing imports at the *oldest* version in that range. Dropping it lets the resolver pick **3.14.3**, above every fix version. Evidence: `docs/audit-evidence/t2/dep-step1-aiohttp.txt` |
-| `starlette` | 0.27.0 | 7 unique | **No** — see below; the one package genuinely in the request path |
+| ~~`starlette`~~ | **1.3.1** | ~~7 unique~~ **0** | **Fixed.** 1.3.1 is the lowest version clearing all seven — PYSEC-2026-249 is fixed only there. Reaching it required `fastapi` 0.104.1 → **0.136.0**, and *not* the latest 0.141.1: that introduces `_IncludedRouter` in `app.routes`, which the pinned `opentelemetry-instrumentation-fastapi==0.41b0` crashes on — measured as **HTTP 500 on every request**. 0.136.0 is the newest release without it that still allows starlette unbounded. `starlette` is now pinned explicitly, because 0.136.0 asks only for `>=0.46.0` and the package carrying the advisories must not drift. Evidence: `docs/audit-evidence/t2/dep-step2-fastapi-starlette.txt` |
 | `transformers` | 4.57.6 | 5 | **No** — arrives via `sentence-transformers`, which is itself unimportable |
-| `fastapi` | 0.104.1 | 1 | **No** — the `python-multipart` ReDoS; that package is not installed |
+| ~~`fastapi`~~ | **0.136.0** | ~~1~~ **0** | **Fixed** by the same bump. (The advisory was the `python-multipart` ReDoS, and that package is not installed here anyway.) |
 | `protobuf` | 4.25.9 | 1 | **No** — `json_format.ParseDict` is never called |
 | `python-dotenv` | 1.0.0 | 1 | **No** — `set_key`/`unset_key` are never called |
 | `pytest` | 8.4.2 | 1 | **No** — test-only, not shipped |
