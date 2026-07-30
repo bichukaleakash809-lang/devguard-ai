@@ -1343,7 +1343,7 @@ Continuing past this point would mean inventing work. Do not.
 |---|---|---|
 | 6.1 | Stand up SigNoz at a pinned version | **DONE** — see "T2 §6.1 / §6.3 — SIGNOZ IS UP" below |
 | 6.3 | One trace visible in the SigNoz UI + screenshot | **DONE except the two agents that need a live LLM key** (same section) |
-| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **NOT STARTED** — no longer blocked; SigNoz is running |
+| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **PARTIAL** — dashboard DONE (imported, renders, live data); alerts corrected but none pre-created |
 
 > The section below this table is the ORIGINAL blocked-state record from when the
 > registry was thought to be the wall. It is kept because its diagnosis is still
@@ -1648,6 +1648,97 @@ exported once it **ends**, so `scan_request` is the *last* span of its trace to
 arrive. The assertion caught a half-written trace (`spans in trace: 1`) and
 reported a failure that was really a race in the test. It now waits for the root
 span specifically. The bug was in the harness, not the deployment.
+
+---
+
+## T2 §6.6 — DASHBOARD DONE, ALERTS CORRECTED BUT NOT CREATED
+
+Full evidence: **`docs/audit-evidence/t2/signoz-6.6-dashboard-alerts.txt`**
+
+**§6.1/§6.3 re-verified first, no regression** — `verify_signoz.sh` exit 0,
+28 spans stored, before any §6.6 work began.
+
+### The dashboard was entirely dead, and it is now fixed
+
+**SigNoz stores OTel metric names verbatim — it does NOT convert dots to
+underscores.** The metrics store holds `devguard.cache.miss_total`;
+`dashboard.json` asked for `devguard_cache_miss_total`. Counted directly:
+
+```sql
+SELECT count() FROM signoz_metrics.distributed_time_series_v4
+WHERE metric_name IN (<the 10 names dashboard.json referenced>)
+-- 0
+```
+
+**Zero.** Every metric panel queried a name that can never exist — not "empty for
+lack of traffic".
+
+Fixed by extracting the 12 real names from the `_meter.create_*(name=...)` calls
+in `telemetry.py` and rewriting each reference **only where the dotted name is one
+the code actually emits** — nothing renamed on a guess. 10 lines changed.
+
+**One panel deleted:** "RAG Context-K Adaptation Frequency" queried span
+attribute `rag.context_k_adjusted`, which is **absent from the whole codebase**
+(`grep` finds nothing). It belongs to the Pattern-Learning Agent that README
+already documents as not firing. A panel that can never populate is the dashboard
+equivalent of an overclaim. It should return in the same commit that wires the loop.
+
+**Three panels deliberately untouched:** the `dataSource: traces` ones. Their
+span attributes (`routing.override_reason`, `postmortem.text`, `breaker.name`,
+`circuit_breaker.postmortem`) were checked and **do** exist in the code — they are
+empty only because those paths need a completed scan. Data gap, not a defect.
+
+**Verified against the running instance.** The v1 dashboards API is gone
+(`HTTP 501 dashboard_deprecated`); `POST /api/v2/dashboards` returns **HTTP 201**
+and SigNoz migrates the file to `schemaVersion: v6`. All 9 panels survive — sent
+9, stored 9. Re-read from the server, all 10 metric references match emitted
+metrics; **none unmatched**. Screenshot `signoz/03-dashboard-imported.png` shows
+it rendering, with **"LLM Error Rate" plotting a real series** — that panel is the
+proof, since before the rename it could only ever be empty.
+
+The other panels read "No data": latency/cost/token metrics only record on a scan
+that completes, which needs an API key. Names are correct, which is what §6.6 can
+verify without one.
+
+### A wrong result I discarded rather than reported
+
+An attempt to prove the same defect through `/api/v5/query_range` returned 0
+datapoints for **both** the underscore and the dotted name — which looked like
+confirmation. It was not: the same harness returned 0 for `signoz_calls_total`,
+which certainly has data, so the query shape was simply wrong. Discarded. The
+ClickHouse count above is the evidence.
+
+### Alerts — corrected, but honestly still not shipped
+
+`GET /api/v1/rules` → `[]`. **No alert rule exists.**
+
+`alerts.md` specified three metrics — `devguard_slo_compliance_pct`,
+`devguard_circuit_breaker_state`, `devguard_llm_cost_usd_total` — **none of which
+exist anywhere in the codebase**, admitted only in a soft aside. Anyone following
+it would have built three alerts that never fire. Rewritten against real metrics,
+and **two had to change meaning, not just names**:
+
+| was | now | why |
+|---|---|---|
+| SLO Compliance Degradation | **LLM error burst** | there is no SLO metric at all |
+| Circuit Breaker Stuck Open | **Circuit breaker flapping** | only a transition *counter* is emitted, not a state *gauge* — a counter cannot express "is currently open" |
+| Cost Budget Exceeded | unchanged | just the correct name, `devguard.llm.cost_total` |
+
+**Why they are not pre-created** — recorded as a failure, not omitted. Four
+approaches, all rejected: builder `compositeQuery` (400 *"alert rule is not
+valid"*), same with `version` v3/v4/v5 (400 *"definition is not valid"*),
+`promql_rule` (400), and UI automation — the metric picker is not a plain
+`<input>`, so **Save Alert Rule** never enabled. The API error names no field, so
+more attempts would be guesswork. Shipping a rule JSON no running SigNoz has ever
+accepted is exactly the unverified-asset problem this track exists to remove.
+
+### Useful API facts for whoever picks this up
+
+* `/api/v1/login` returns **SPA HTML**. The real endpoint is
+  **`POST /api/v2/sessions/email_password`**, and it **requires `orgId`** in the
+  body (*"orgID is required"* without it). Get it from Postgres:
+  `SELECT id FROM organizations LIMIT 1`.
+* `POST /api/v1/dashboards` → **501 deprecated**; use `/api/v2/dashboards`.
 
 ### One more trap worth knowing
 

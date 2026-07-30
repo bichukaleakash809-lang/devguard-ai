@@ -116,8 +116,19 @@ Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI 
 ## SigNoz Usage
 
 - **Traces** — the pipeline is instrumented so each scan emits one distributed trace (`devguard_pipeline → scanner_agent / fixer_agent / validator_agent`) plus self-observation spans, with logs bridged to the same trace via OpenTelemetry's `LoggingHandler`. **Not yet verified end to end against a running SigNoz instance** — see Limitations.
-- **Dashboards** — `signoz/dashboard.json` is committed but has not been imported and verified against a live SigNoz.
-- **Alerts** — `signoz/alerts.md` describes three intended rules. They are **not shipped**: as that file states, each depends on a metric that `telemetry.py` does not yet emit.
+- **Dashboards** — `signoz/dashboard.json` **has been imported into a real SigNoz
+  (v0.135.0) and renders**; screenshot in `docs/audit-evidence/t2/signoz/`. Every
+  panel now references a metric `telemetry.py` actually emits — before this it
+  referenced ten metric names that **matched nothing**, because SigNoz stores OTel
+  names verbatim (`devguard.scan.latency`) and the file used underscores
+  (`devguard_scan_latency`). One panel is confirmed plotting live data; the rest
+  are correctly wired but need a scan that completes, which needs an API key.
+- **Alerts** — `signoz/alerts.md` describes three rules, each now written against
+  a metric that genuinely exists. **No alert rule is pre-created** in the SigNoz
+  instance (`GET /api/v1/rules` → `[]`), and that file records why, including the
+  payload shapes the API rejected. Two of the three original rules had to change
+  meaning: there is no SLO-compliance metric and no breaker *state* gauge, only a
+  transition counter.
 - **MCP** — `backend/core/mcp_client.py` provides a fail-safe client interface for the SigNoz MCP server. **It has not been verified against a real MCP server**: the transport and response shapes are unconfirmed (the file carries its own TODO). When the call path is unavailable the cost query falls back to an in-process estimate, which is reported as `data_source: "local_shadow"` — never as live telemetry.
 
 ## Reproducibility

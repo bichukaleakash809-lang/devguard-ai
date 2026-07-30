@@ -1,156 +1,133 @@
 # SigNoz Alert Rules — DevGuard AI
 
-Three alert rules covering the three failure modes that matter for a
-self-observing agentic pipeline: **is the SLO being met**, **is the breaker
-stuck protecting us from a dead upstream**, and **are we burning money**.
+**Status: these rules are NOT pre-created in any SigNoz instance.** Verified, not
+assumed — against the live instance this repo stands up:
 
-> **Setup note before you paste these in:** SigNoz alerts are built on
-> **metrics**, not raw span events. `circuit_breaker.state_change` and
-> `llm.cost_usd` currently exist as span *events*/*attributes* (see
-> `resilience.py` / `mcp_client.py`), which are great for trace correlation
-> but aren't directly queryable in the alert rule builder over a rolling
-> window. Each alert below assumes one corresponding OTel metric is emitted
-> alongside the existing span instrumentation (a few lines added to
-> `telemetry.py`, not shown here). Where that's the case it's called out
-> explicitly so a judge can see exactly what to check for.
+```
+$ curl -H "Authorization: Bearer $JWT" http://localhost:3301/api/v1/rules
+{"status":"success","data":[]}
+```
+
+What this file gives you is three rules that can be built in the SigNoz UI in a
+couple of minutes each, **every one of them written against a metric
+`backend/core/telemetry.py` actually emits.** That was not true before: the
+previous version of this file specified three metrics
+(`devguard_slo_compliance_pct`, `devguard_circuit_breaker_state`,
+`devguard_llm_cost_usd_total`) that **do not exist anywhere in the codebase**, and
+it said so only in a soft aside ("assumes one corresponding OTel metric is
+emitted … a few lines added to `telemetry.py`, not shown here"). Anyone pasting
+those rules in would have got three alerts that never fire.
+
+## The metrics that actually exist
+
+Read straight out of `backend/core/telemetry.py`. **Note the dots** — SigNoz
+stores OTel metric names verbatim, so `devguard_scan_latency` matches nothing:
+
+| metric | type | unit |
+|---|---|---|
+| `devguard.scan.latency` | histogram | ms |
+| `devguard.llm.cost_per_request` | histogram | USD |
+| `devguard.llm.tokens_per_sec` | histogram | tokens/s |
+| `devguard.llm.tokens_total` | counter | tokens |
+| `devguard.llm.exceptions_total` | counter | 1 |
+| `devguard.cache.hit_total` | counter | 1 |
+| `devguard.cache.miss_total` | counter | 1 |
+| `devguard.circuit_breaker.state_changes_total` | counter | 1 |
+| `devguard.threats_blocked` | counter | 1 |
+| `devguard.llm.cost_saved` | counter | USD |
+| `devguard.llm.total_tokens` | counter | tokens |
+| `devguard.llm.cost_total` | counter | USD |
+
+**There is no SLO-compliance metric and no circuit-breaker *state* gauge.** Those
+two absences change what can honestly be alerted on, and the rules below are
+written around them rather than pretending otherwise.
 
 ---
 
-## 1. SLO Compliance Degradation
+## 1. LLM error burst
 
 | | |
 |---|---|
-| **Name** | `devguard-slo-compliance-degradation` |
-| **Watches** | The rolling SLO compliance percentage backing the `/slo-status` endpoint — i.e. "are we still inside our 99.5% target error budget." |
-| **Threshold** | `< 95` (percent), sustained for **5 minutes** |
-| **Notification** | Slack `#devguard-oncall` webhook |
-| **Why it matters** | This is the single number that turns "the pipeline threw some errors" into "we are at risk of breaching our published SLO" — it's the metric a judge (or an on-call human) should see *before* anyone opens a dashboard. |
+| **Name** | `devguard-llm-error-burst` |
+| **Metric** | `devguard.llm.exceptions_total` (counter) |
+| **Condition** | `increase` over 5m, **above 5**, at least once |
+| **Severity** | warning |
 
-**Metric assumption:** `devguard_slo_compliance_pct` (gauge, 0–100), exported
-from the same calculation that backs `/slo-status`.
+Replaces the old "SLO Compliance Degradation" rule. That rule watched
+`devguard_slo_compliance_pct`, which does not exist — nothing in the codebase
+exports the calculation behind `/slo-status` as a metric. The error counter is
+the closest signal that is genuinely emitted, and it catches the same class of
+problem (the pipeline is failing repeatedly) without inventing a metric.
 
-**PromQL condition** (SigNoz metrics alert, Prometheus-compatible query):
-
-```promql
-avg(devguard_slo_compliance_pct{service="devguard-backend"}) < 95
-```
-
-**Alert rule config** (SigNoz UI equivalent):
-
-```yaml
-alert: SLOComplianceDegradation
-ruleType: metric_based_alert
-condition:
-  query: avg(devguard_slo_compliance_pct{service="devguard-backend"})
-  op: "<"
-  target: 95
-evalWindow: 5m
-for: 5m
-severity: warning
-labels:
-  team: devguard
-annotations:
-  summary: "SLO compliance dropped below 95% for {{ $labels.service }}"
-  description: "Current value: {{ $value }}%. Target: 99.5%. Check /slo-status and recent circuit breaker activity."
-```
+**UI:** Alerts → New Alert → Metric based Alert → metric
+`devguard.llm.exceptions_total` → *aggregate within time series* `Increase`,
+*across* `Sum` → condition `ABOVE` `5` `AT LEAST ONCE` during `Last 5 minutes`.
 
 ---
 
-## 2. Circuit Breaker Stuck Open
+## 2. Circuit breaker flapping
 
 | | |
 |---|---|
-| **Name** | `devguard-breaker-stuck-open` |
-| **Watches** | Whether the `groq_primary` circuit breaker has been in the `OPEN` state continuously for too long — i.e. the fallback model has been carrying 100% of traffic for over a minute, meaning the primary upstream isn't recovering on its own. |
-| **Threshold** | Breaker state `== OPEN` for **> 60 continuous seconds** |
-| **Notification** | Slack `#devguard-oncall` webhook (mark as `severity: critical` — unlike alert #1, this means live traffic is currently degraded, not just at risk) |
-| **Why it matters** | A breaker that *opens* is the system working as designed (see `resilience.py`'s blast-radius containment). A breaker that's *still open a minute later* means the automatic degrade-to-fallback safety net has become the primary path — that's the line between "resilience absorbed a blip" and "we have an ongoing incident," and it's exactly the kind of state transition the pipeline can now narrate about itself via the `PostmortemAgent` hook. |
+| **Name** | `devguard-circuit-breaker-flapping` |
+| **Metric** | `devguard.circuit_breaker.state_changes_total` (counter) |
+| **Condition** | `increase` over 5m, **above 3**, at least once |
+| **Severity** | critical |
 
-**Metric assumption:** `devguard_circuit_breaker_state` (gauge, per
-`breaker` label: `0=closed`, `1=open`, `2=half_open`), updated at the same
-point `_transition()` already emits the `circuit_breaker.state_change` span
-event, so the metric and the trace-level narrative never drift apart.
+Replaces the old "Circuit Breaker Stuck Open" rule, and the change is not
+cosmetic. That rule needed `devguard_circuit_breaker_state` as a **gauge**
+(`0=closed, 1=open, 2=half_open`) so it could assert "held at OPEN for 60
+continuous seconds". **No such gauge is emitted.** What exists is a *counter of
+transitions*, and a counter cannot express "is currently open" — only "changed
+state N times".
 
-**PromQL condition:**
-
-```promql
-max_over_time(devguard_circuit_breaker_state{breaker="groq_primary"}[60s]) == 1
-and
-min_over_time(devguard_circuit_breaker_state{breaker="groq_primary"}[60s]) == 1
-```
-
-*(both `max` and `min` pinned to `1` over the window is the simplest way to
-express "held at OPEN for the entire 60s," not just "touched OPEN at some
-point.")*
-
-**Alert rule config:**
-
-```yaml
-alert: CircuitBreakerStuckOpen
-ruleType: metric_based_alert
-condition:
-  query: min_over_time(devguard_circuit_breaker_state{breaker="groq_primary"}[60s])
-  op: "=="
-  target: 1
-evalWindow: 60s
-for: 60s
-severity: critical
-labels:
-  team: devguard
-  breaker: groq_primary
-annotations:
-  summary: "groq_primary circuit breaker has been OPEN for over 60s"
-  description: "Primary LLM provider has been suppressed continuously; all traffic is on fallback ({{ $labels.breaker }}). Check the linked trace's circuit_breaker.postmortem span event for the AI-generated incident summary."
-```
+So the honest rule is a different one: a breaker that transitions repeatedly is
+failing to settle, which is the same incident from the other side. If you want
+the original "stuck open" semantics, `telemetry.py` needs an
+`observable_gauge` for breaker state first; until it has one, do not write a rule
+that claims to detect it.
 
 ---
 
-## 3. Cost Budget Exceeded
+## 3. LLM cost budget
 
 | | |
 |---|---|
-| **Name** | `devguard-cost-budget-exceeded` |
-| **Watches** | Cumulative LLM spend over a rolling 30-minute window, checked against the same `COST_BUDGET_USD_PER_30MIN` env-configured threshold the self-observing router already uses internally to reason about cost trends. |
-| **Threshold** | `sum(llm.cost_usd) over 30m` `>` `COST_BUDGET_USD_PER_30MIN` |
-| **Notification** | Slack `#devguard-oncall` webhook, plus (optional) email to whoever owns the Groq billing account |
-| **Why it matters** | This is the one alert that isn't about correctness or availability — it's the guardrail that keeps a self-directed agent pipeline (which routes its own model tiers and retries its own fixes) from silently running up an unbounded bill, closing the loop between "the router can *see* cost via `get_recent_cost_trend()`" and "a human gets paged before it becomes a real number." |
+| **Name** | `devguard-llm-cost-budget` |
+| **Metric** | `devguard.llm.cost_total` (counter, USD) |
+| **Condition** | `increase` over 30m, **above your budget**, at least once |
+| **Severity** | warning |
 
-**Metric assumption:** `devguard_llm_cost_usd_total` (monotonic counter),
-incremented by the same value written to the `llm.cost_usd` span attribute on
-every LLM call, so trace-level cost and the alerting metric always agree.
+The only one of the three that survives largely intact. The old file named
+`devguard_llm_cost_usd_total`; the real counter is **`devguard.llm.cost_total`**.
+Set the threshold to whatever `COST_BUDGET_USD_PER_30MIN` is set to, so the alert
+and the router's own conservation logic agree on the number.
 
-**PromQL condition:**
-
-```promql
-sum(increase(devguard_llm_cost_usd_total[30m])) > <COST_BUDGET_USD_PER_30MIN>
-```
-
-**Alert rule config:**
-
-```yaml
-alert: CostBudgetExceeded
-ruleType: metric_based_alert
-condition:
-  query: sum(increase(devguard_llm_cost_usd_total[30m]))
-  op: ">"
-  target: ${COST_BUDGET_USD_PER_30MIN}   # same env var the router reads
-evalWindow: 30m
-for: 1m
-severity: warning
-labels:
-  team: devguard
-annotations:
-  summary: "LLM spend exceeded budget for the last 30 minutes"
-  description: "Spent ${{ $value }} against a ${COST_BUDGET_USD_PER_30MIN} budget. Check cost_by_model breakdown from get_recent_cost_trend() to see which tier is driving it."
-```
+Note the caveat carried over from `local_telemetry.py`: recorded cost is
+provider-reported where the SDK supplies usage and a chars/4 estimate otherwise,
+so this alert inherits that accuracy.
 
 ---
 
-## Wiring notifications (all three)
+## Notifications
 
-All three point at the same channel for a hackathon demo — one Slack
-Incoming Webhook, added once under **Settings → Alert Channels** in SigNoz,
-then referenced by name in each rule's notification step. Split
-`#devguard-oncall` into severity-specific channels later if this goes past
-demo stage; for now, one channel keeps the judge's verification path to
-"add webhook URL → save → done" under the 2-minute budget.
+SigNoz needs a channel before any rule can notify: **Settings → Alert Channels**
+→ add a Slack Incoming Webhook (or email/PagerDuty/webhook), then reference it
+from each rule's notification step. With no channel configured a rule still
+evaluates and shows as firing in the UI — it just cannot page anyone.
+
+## Why these are not shipped pre-created
+
+Creating them programmatically was attempted and **failed**, and the failure is
+recorded rather than hidden: `POST /api/v1/rules` on SigNoz v0.135.0 rejected
+every payload shape tried — builder-style `compositeQuery` (with and without a
+`version` field) and `promql_rule` — each with
+`{"errorType":"bad_data","error":"alert rule is not valid"}`, and the error does
+not say which field is wrong. Driving the UI's query builder headlessly did not
+work either: its metric picker is not a plain `<input>`, so the metric could
+never be selected and **Save Alert Rule** stayed disabled.
+
+Rather than ship a rule JSON that has never been accepted by a running SigNoz,
+this file documents the UI path, which is verified to work and takes about two
+minutes per rule. If someone captures a working payload from the browser's
+network tab, it belongs in this repo and this section should be replaced with it.

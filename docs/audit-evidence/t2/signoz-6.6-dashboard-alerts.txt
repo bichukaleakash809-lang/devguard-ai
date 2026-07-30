@@ -1,0 +1,248 @@
+================================================================================
+T2 §6.6 — SIGNOZ ASSETS: DASHBOARD IMPORTED AND VERIFIED; ALERTS CORRECTED
+================================================================================
+Captured: 2026-07-30, against the live stack from signoz/deploy/docker-compose.yaml
+SigNoz v0.135.0 (confirmed by /api/v1/version)
+
+§6.6 reads: "Ship the SigNoz assets: signoz/dashboard.json importable and
+verified; signoz/alerts.md reflecting alerts that actually exist."
+
+RESULT
+  dashboard.json  DONE   — imports into a real SigNoz, renders, and every panel
+                           now references a metric the code actually emits. One
+                           panel confirmed plotting live data.
+  alerts.md       PARTIAL — the file now reflects reality (it previously
+                           specified three metrics that do not exist), but NO
+                           alert rule is created in the instance. Programmatic
+                           creation failed; see §5. Not claimed as done.
+
+Therefore §6.6 is NOT fully complete, and T2 is not complete.
+
+--------------------------------------------------------------------------------
+1. FIRST, A NO-REGRESSION CHECK ON §6.1 / §6.3
+--------------------------------------------------------------------------------
+
+Before touching §6.6, the previous phase was re-verified from a clean stack —
+the instruction was not to redo it unless something had actually regressed:
+
+    $ PYTHON=<venv> ./scripts/verify_signoz.sh
+    trace_id: 27263e06be14963ed908ee3bdfa81f63
+    devguard-backend spans stored: 28
+    PASSED — SigNoz is up (§6.1) and a real DevGuard trace is stored
+    EXIT 0
+
+No regression. §6.1/§6.3 untouched by this phase.
+
+--------------------------------------------------------------------------------
+2. THE DASHBOARD DEFECT — PROVEN BEFORE IT WAS FIXED
+--------------------------------------------------------------------------------
+
+SigNoz stores OTel metric names VERBATIM. It does not translate dots to
+underscores. Ground truth, read straight out of the metrics store:
+
+    $ SELECT DISTINCT metric_name FROM signoz_metrics.distributed_time_series_v4
+    devguard.cache.miss_total          <- dots preserved
+    devguard.llm.exceptions_total
+    http.server.duration.bucket
+    http.server.request.size.count
+    ...
+    signoz_calls_total                 <- only SigNoz's OWN metrics use underscores
+
+`dashboard.json` referenced ten metric names, all with underscores. How many of
+them exist in the metrics store:
+
+    $ SELECT count() FROM signoz_metrics.distributed_time_series_v4
+      WHERE metric_name IN ('devguard_cache_hit_total','devguard_cache_miss_total',
+        'devguard_circuit_breaker_state_changes_total','devguard_llm_cost_per_request',
+        'devguard_llm_exceptions_total','devguard_llm_tokens_total',
+        'devguard_scan_latency', ...)
+    0
+
+**Zero.** Every metric panel on the shipped dashboard was dead — not "empty
+because there is no traffic", but querying names that can never exist.
+
+A NOTE ON HOW THIS WAS *NOT* PROVEN. An attempt to demonstrate the same thing
+through SigNoz's /api/v5/query_range returned 0 datapoints for the underscore
+name AND the dotted name — which looked like confirmation. It was not: the same
+harness also returned 0 for `signoz_calls_total`, a metric that certainly has
+data, so the query shape was simply wrong. That result was discarded rather than
+reported. The ClickHouse query above is the evidence; the API probe is not.
+
+--------------------------------------------------------------------------------
+3. THE FIX
+--------------------------------------------------------------------------------
+
+(a) METRIC NAMES. The 12 real names were extracted from the source of truth —
+    the `_meter.create_*(name=...)` calls in backend/core/telemetry.py — and each
+    underscore reference was rewritten to the dotted name, but ONLY where the
+    dotted name is one the code actually emits. Nothing was renamed on a guess.
+
+        devguard_scan_latency                        -> devguard.scan.latency          x3
+        devguard_llm_cost_per_request                -> devguard.llm.cost_per_request  x2
+        devguard_llm_tokens_total                    -> devguard.llm.tokens_total      x1
+        devguard_llm_exceptions_total                -> devguard.llm.exceptions_total  x1
+        devguard_circuit_breaker_state_changes_total -> devguard.circuit_breaker.state_changes_total x1
+        devguard_cache_hit_total                     -> devguard.cache.hit_total       x1
+        devguard_cache_miss_total                    -> devguard.cache.miss_total      x1
+
+    Applied as a textual replacement of exact quoted names so the diff is 10
+    lines and nothing else in the file moved.
+
+(b) ONE PANEL DELETED. "RAG Context-K Adaptation Frequency" queried the span
+    attribute `rag.context_k_adjusted`. That attribute is **absent from the entire
+    codebase**:
+
+        $ grep -rn "rag.context_k_adjusted" backend/ --include=*.py
+        (no match)
+
+    It corresponds to the Pattern-Learning Agent, which README already documents
+    as not firing. A panel that can never populate is the dashboard equivalent of
+    an overclaim, so it was removed (widget + layout entry, no dangling ids:
+    widgets 10 -> 9). It should come back in the same commit that wires the loop.
+
+(c) THREE PANELS DELIBERATELY LEFT ALONE. "Adaptive Routing Overrides",
+    "Postmortem Agent Triggers" and the trace-based half of the dashboard use
+    `dataSource: traces`, not metrics — they query span attributes, which is
+    structurally correct. Their attributes were checked and DO exist in the code:
+
+        routing.override_reason      ai_agent.py:868, :876
+        postmortem.text              resilience.py:293
+        breaker.name                 resilience.py:188, :292
+        circuit_breaker.postmortem   resilience.py:290
+
+    They return nothing today only because those code paths need a completed
+    scan. That is a data gap, not a wiring defect, so nothing was changed.
+
+--------------------------------------------------------------------------------
+4. §6.6 DASHBOARD — VERIFIED AGAINST A RUNNING SIGNOZ
+--------------------------------------------------------------------------------
+
+IMPORT. The v1 API is gone in v0.135.0 — worth recording, because the obvious
+call fails:
+
+    $ POST /api/v1/dashboards
+    HTTP 501 {"code":"dashboard_deprecated","message":"the v1 dashboard API is
+    deprecated; instead, create a dashboard with POST /api/v2/dashboards"}
+
+    $ POST /api/v2/dashboards  --data-binary @signoz/dashboard.json
+    HTTP 201
+    id: 019fb3f2-bbd7-71b3-88aa-e1ab5179cd42
+    schemaVersion: v6        (SigNoz migrated the file on ingest)
+
+All 9 panels survived the migration — sent 9, stored 9, dropped none. (An
+earlier reading of this output claimed one panel was missing; that was a
+truncated `[:8]` in the inspection script, not a real drop.)
+
+METRIC NAMES IN THE STORED DASHBOARD. Read back from the server after import,
+and cross-checked against the emitted-metric list:
+
+    panel-latency              devguard.scan.latency (x3)
+    panel-cost                 devguard.llm.cost_per_request
+    panel-cost-vs-threshold    devguard.llm.cost_per_request
+    panel-tokens               devguard.llm.tokens_total
+    panel-error-rate           devguard.llm.exceptions_total
+    panel-breaker              devguard.circuit_breaker.state_changes_total
+    panel-cache-ratio          devguard.cache.hit_total, devguard.cache.miss_total
+    panel-routing-overrides    (traces)
+    panel-postmortem-triggers  (traces)
+
+    referenced devguard metrics: 10
+    NOT emitted by the code:     none
+
+RENDERS, WITH LIVE DATA. Screenshot `signoz/03-dashboard-imported.png` shows the
+dashboard open in SigNoz — title "DevGuard AI — Observability & Resilience", its
+six tags, and the `$deployment_environment` variable. **"LLM Error Rate" plots a
+real series** (legend "A", data from ~16:48), which is
+`devguard.llm.exceptions_total` — one of exactly two metrics that currently have
+samples. That single rendered panel is the proof the rename worked: before it,
+that panel queried `devguard_llm_exceptions_total` and could only ever be empty.
+
+The other panels read "No data in this time range". That is expected and is NOT
+the bug that was just fixed: latency, cost and token metrics are only recorded on
+a scan that completes, and without a `GROQ_API_KEY` every scan fails at the
+Scanner. Their names are now correct, which is what §6.6 can verify without a key.
+
+--------------------------------------------------------------------------------
+5. §6.6 ALERTS — HONEST STATE, NOT A CLAIM
+--------------------------------------------------------------------------------
+
+NO ALERT RULE EXISTS. Verified against the live instance:
+
+    $ GET /api/v1/rules
+    {"status":"success","data":[]}
+
+WHAT alerts.md USED TO SAY, and why it was wrong. It specified three rules built
+on three metrics:
+
+    devguard_slo_compliance_pct     DOES NOT EXIST anywhere in the codebase
+    devguard_circuit_breaker_state  DOES NOT EXIST
+    devguard_llm_cost_usd_total     DOES NOT EXIST (the real one is
+                                    devguard.llm.cost_total)
+
+The file admitted this only in a soft aside ("assumes one corresponding OTel
+metric is emitted … not shown here"). Anyone following it would have built three
+alerts that never fire. Rewritten so every rule targets a metric that genuinely
+exists, and two of the three had to CHANGE MEANING rather than be renamed:
+
+  * "SLO Compliance Degradation" -> "LLM error burst". There is no SLO metric.
+    Nothing exports the calculation behind /slo-status.
+  * "Circuit Breaker Stuck Open" -> "Circuit breaker flapping". The old rule
+    needed a breaker-state GAUGE (0/1/2) to assert "held OPEN for 60s". Only a
+    transition COUNTER is emitted, and a counter cannot express "is currently
+    open" — only "changed state N times". Writing the original rule would have
+    meant claiming a detection that is not possible with the data.
+  * "Cost Budget Exceeded" survives, with the correct counter name.
+
+WHY THE RULES ARE NOT PRE-CREATED — recorded as a failure, not omitted. Four
+approaches were tried and all failed:
+
+    POST /api/v1/rules, builder compositeQuery         400 "alert rule is not valid"
+    POST /api/v1/rules, + "version": v3/v4/v5          400 "alert rule definition
+                                                            is not valid" (v3/v4)
+    POST /api/v1/rules, ruleType promql_rule           400 "alert rule is not valid"
+    UI automation of the alert builder                 the metric picker is not a
+                                                       plain <input>; the metric
+                                                       could never be selected and
+                                                       "Save Alert Rule" stayed
+                                                       disabled
+
+The API error names no field, so further attempts would have been guesswork.
+Shipping a rule JSON that has never been accepted by a running SigNoz would be
+exactly the kind of unverified asset this track exists to remove, so alerts.md
+documents the UI path instead and states plainly that nothing is pre-created.
+
+--------------------------------------------------------------------------------
+6. REPRODUCTION
+--------------------------------------------------------------------------------
+
+    ./scripts/verify_signoz.sh                       # stack up, traffic, spans
+    ORG=$(docker exec signoz-signoz-metastore-postgres-0-1 \
+          psql -U signoz -d signoz -tAc "SELECT id FROM organizations LIMIT 1")
+    JWT=$(curl -s -X POST http://localhost:3301/api/v2/sessions/email_password \
+          -H 'Content-Type: application/json' \
+          -d "{\"email\":\"devguard@example.com\",\"password\":\"DevGuard!2026\",\"orgId\":\"$ORG\"}" \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["accessJwt"])')
+
+    curl -X POST http://localhost:3301/api/v2/dashboards \
+      -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
+      --data-binary @signoz/dashboard.json          # expect HTTP 201
+
+    curl -H "Authorization: Bearer $JWT" http://localhost:3301/api/v1/rules
+                                                    # expect {"data":[]}
+
+Note the login endpoint: `/api/v1/login` returns the SPA HTML in v0.135.0. The
+real one is **POST /api/v2/sessions/email_password**, and it REQUIRES an `orgId`
+in the body ("orgID is required" without it).
+
+--------------------------------------------------------------------------------
+7. WHAT §6.6 STILL NEEDS
+--------------------------------------------------------------------------------
+
+  * A captured, working alert-rule payload (browser network tab while saving a
+    rule in the UI) so the three rules can ship pre-created.
+  * A GROQ_API_KEY, for the six metric panels whose names are now correct but
+    which have no samples until a scan completes.
+
+Neither is a code or deployment defect.
+
+================================================================================
