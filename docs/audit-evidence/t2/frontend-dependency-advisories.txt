@@ -1,0 +1,202 @@
+FRONTEND DEPENDENCY ADVISORIES — measured, triaged, NOT actioned
+================================================================
+Captured in a fresh clone of claude/track-t0-audit-evgu8j at 4e3d9b2 after
+`npm install` (exit 0). DevGuard is a security tool, so its own dependency
+posture is in scope for the audit.
+
+RESOLVED VERSIONS
+-----------------
+  package.json range   next: ^14.2.32
+  installed            next: 14.2.35   <- the latest 14.x; no in-range fix exists
+  top-level postcss    8.5.19          <- NOT vulnerable (advisories cap at <=8.5.17)
+  nested postcss       8.4.31          <- vulnerable, but it is next's own
+                                          build-time CSS dependency
+
+COUNT
+-----
+  18 advisories: 0 critical, 16 high, 2 moderate, 0 low.
+  `npm audit fix` cannot resolve them. `npm audit fix --force` installs
+  next@16.2.12 — a two-major-version break.
+
+REACHABILITY TRIAGE (against this app's actual configuration)
+-------------------------------------------------------------
+Verified absent from this codebase:
+  frontend/middleware.*         -> does not exist
+  "use server" directives       -> zero matches in app/, components/, lib/
+  i18n config in next.config    -> not configured
+  rewrites / redirects          -> not configured
+  frontend/pages/               -> does not exist (App Router only)
+  build output                  -> all 5 routes prerendered as Static (○)
+
+NOT REACHABLE — no Server Actions / Server Functions in this app:
+  GHSA-m99w-x7hq-7vfj  DoS in App Router using Server Actions
+  GHSA-89xv-2m56-2m9x  SSRF in Server Actions on custom servers
+  GHSA-4c39-4ccg-62r3  Unbounded Server Action payload in Edge runtime
+  GHSA-955p-x3mx-jcvp  Unauthenticated disclosure of internal Server Function
+                       endpoints
+
+NOT REACHABLE — no Pages Router, no i18n, no rewrites:
+  GHSA-36qx-fr4f-26g5  Middleware / Proxy bypass in Pages Router using i18n
+  GHSA-p9j2-gv94-2wf4  SSRF in rewrites via attacker-controlled destination host
+
+NOT REACHABLE AT RUNTIME — nested postcss is next's build-time dependency, and
+the app's own postcss (8.5.19) is already patched. These need an attacker to
+control CSS *source* fed to the build:
+  GHSA-qx2v-qp2m-jg93  XSS via unescaped </style> in CSS stringify output
+  GHSA-6g55-p6wh-862q  Arbitrary file read via attacker-controlled sourceMappingURL
+  GHSA-r28c-9q8g-f849  Path traversal in previous-source-map auto-loading
+
+POTENTIALLY REACHABLE — the response/RSC cache-confusion class. This app is
+fully statically prerendered and serves no user-specific responses, which
+narrows the impact substantially, but these are not structurally excluded the
+way the groups above are:
+  GHSA-wfc6-r584-vfw7  Cache poisoning in React Server Component responses
+  GHSA-68g3-v927-f742  Cache confusion of response bodies for requests with bodies
+  GHSA-4633-3j49-mh5q  Cache confusion for request bodies with invalid UTF-8
+
+CONCLUSION AND WHY NOTHING WAS CHANGED
+--------------------------------------
+Real finding, honestly bounded: most of the 18 are unreachable in this app's
+configuration, and the reachable remainder is the response-cache class against
+a fully static frontend.
+
+The only available fix is next 14 -> 16, a breaking major upgrade across the
+App Router. Contract §13.1 forbids dependency changes without explicit
+approval, and the standing instruction for this session repeats it. So this is
+recorded, triaged and left in place rather than "fixed" by a bump that would
+also need the whole frontend re-verified.
+
+Recommendation for the owner: approve `next@^16` as its own phase, with
+`npx tsc --noEmit`, `next build`, `next lint` and a manual pass over all five
+routes as the acceptance gate. Do not fold it into an unrelated change.
+
+RAW npm audit OUTPUT
+====================
+# npm audit report
+
+brace-expansion  <=5.0.7
+Severity: high
+brace-expansion: DoS via unbounded expansion length causing an out-of-memory process crash - https://github.com/advisories/GHSA-mh99-v99m-4gvg
+fix available via `npm audit fix --force`
+Will install eslint@10.8.0, which is a breaking change
+node_modules/brace-expansion
+node_modules/glob/node_modules/brace-expansion
+  minimatch  2.0.0 - 10.0.2
+  Depends on vulnerable versions of brace-expansion
+  node_modules/glob/node_modules/minimatch
+  node_modules/minimatch
+    @eslint/eslintrc  0.0.1 || >=0.1.1
+    Depends on vulnerable versions of minimatch
+    node_modules/@eslint/eslintrc
+      eslint  0.12.0 - 2.0.0-rc.1 || 4.1.0 - 10.0.0-rc.2
+      Depends on vulnerable versions of @eslint/eslintrc
+      Depends on vulnerable versions of @humanwhocodes/config-array
+      Depends on vulnerable versions of file-entry-cache
+      Depends on vulnerable versions of minimatch
+      node_modules/eslint
+        eslint-config-next  >=10.2.1-canary.2
+        Depends on vulnerable versions of @next/eslint-plugin-next
+        Depends on vulnerable versions of eslint
+        Depends on vulnerable versions of eslint-plugin-import
+        Depends on vulnerable versions of eslint-plugin-jsx-a11y
+        Depends on vulnerable versions of eslint-plugin-react
+        node_modules/eslint-config-next
+    @humanwhocodes/config-array  *
+    Depends on vulnerable versions of minimatch
+    node_modules/@humanwhocodes/config-array
+    eslint-plugin-import  >=1.15.0
+    Depends on vulnerable versions of minimatch
+    node_modules/eslint-plugin-import
+    eslint-plugin-jsx-a11y  >=6.5.0
+    Depends on vulnerable versions of minimatch
+    node_modules/eslint-plugin-jsx-a11y
+    eslint-plugin-react  >=7.23.0
+    Depends on vulnerable versions of minimatch
+    node_modules/eslint-plugin-react
+    glob  4.3.0 - 10.5.0
+    Depends on vulnerable versions of minimatch
+    node_modules/glob
+    node_modules/rimraf/node_modules/glob
+      @next/eslint-plugin-next  14.0.5-canary.0 - 15.0.0-rc.1
+      Depends on vulnerable versions of glob
+      node_modules/@next/eslint-plugin-next
+      rimraf  2.3.0 - 3.0.2 || 4.2.0 - 5.0.10
+      Depends on vulnerable versions of glob
+      node_modules/rimraf
+        flat-cache  1.3.4 - 4.0.0
+        Depends on vulnerable versions of rimraf
+        node_modules/flat-cache
+          file-entry-cache  4.0.0 - 7.0.2
+          Depends on vulnerable versions of flat-cache
+          node_modules/file-entry-cache
+
+dompurify  <=3.4.11
+Severity: moderate
+DOMPurify contains a Cross-site Scripting vulnerability - https://github.com/advisories/GHSA-v2wj-7wpq-c8vv
+DOMPurify: FORBID_TAGS bypassed by function-based ADD_TAGS predicate (asymmetry with FORBID_ATTR fix) - https://github.com/advisories/GHSA-h7mw-gpvr-xq4m
+DOMPurify has a SAFE_FOR_TEMPLATES bypass in RETURN_DOM mode - https://github.com/advisories/GHSA-crv5-9vww-q3g8
+DOMPurify: Prototype Pollution to XSS Bypass via CUSTOM_ELEMENT_HANDLING Fallback - https://github.com/advisories/GHSA-v9jr-rg53-9pgp
+DOMPurify: Cross-realm IN_PLACE sanitization leaves executable markup intact via realm-bound `instanceof` checks - https://github.com/advisories/GHSA-hpcv-96wg-7vj8
+DOMPurify: IN_PLACE mode preserves attributes of a clobbered root element, allowing XSS via attacker-controlled root DOM - https://github.com/advisories/GHSA-r47g-fvhr-h676
+DOMPurify IN_PLACE Sanitization Bypass via Attached Shadow Root Inside <template>.content - https://github.com/advisories/GHSA-rp9w-3fw7-7cwq
+DOMPurify: `CUSTOM_ELEMENT_HANDLING` bypasses `afterSanitizeElements` for allowed custom elements. - https://github.com/advisories/GHSA-c2j3-45gr-mqc4
+DOMPurify: Permanent `ALLOWED_ATTR` pollution via `setConfig()` bypassing the hook clone-guard (incomplete fix of the 3.4.7 hook-pollution patch) - https://github.com/advisories/GHSA-cmwh-pvxp-8882
+DOMPurify: Trusted Types policy survives `clearConfig()` and can poison later `RETURN_TRUSTED_TYPE` output - https://github.com/advisories/GHSA-vxr8-fq34-vvx9
+DOMPurify: SAFE_FOR_TEMPLATES bypass - template expressions survive sanitization inside <template> content when using DOM output modes - https://github.com/advisories/GHSA-gvmj-g25r-r7wr
+DOMPurify: `IN_PLACE` mode trusts attacker-controlled `nodeName` on live non-form nodes, allowing script retention and XSS via attacker-supplied DOM objects - https://github.com/advisories/GHSA-x4vx-rjvf-j5p4
+DOMPurify: Hook mutation of `data.allowedTags` / `data.allowedAttributes` permanently pollutes `DEFAULT_ALLOWED_TAGS` / `DEFAULT_ALLOWED_ATTR` - https://github.com/advisories/GHSA-76mc-f452-cxcm
+DOMPurify's ADD_TAGS function form bypasses FORBID_TAGS due to short-circuit evaluation - https://github.com/advisories/GHSA-39q2-94rc-95cp
+DOMPurify ADD_ATTR predicate skips URI validation - https://github.com/advisories/GHSA-cjmm-f4jc-qw8r
+DOMPurify USE_PROFILES prototype pollution allows event handlers - https://github.com/advisories/GHSA-cj63-jhhr-wcxv
+DOMPurify is vulnerable to mutation-XSS via Re-Contextualization  - https://github.com/advisories/GHSA-h8r8-wccr-v5f2
+fix available via `npm audit fix`
+node_modules/dompurify
+  monaco-editor  0.54.0-dev-20250909 - 0.56.0-dev-20260625
+  Depends on vulnerable versions of dompurify
+  node_modules/monaco-editor
+
+
+next  9.3.4-canary.0 - 16.3.0-canary.5
+Severity: high
+Next.js self-hosted applications vulnerable to DoS via Image Optimizer remotePatterns configuration - https://github.com/advisories/GHSA-9g9p-9gw9-jx7f
+Next.js HTTP request deserialization can lead to DoS when using insecure React Server Components - https://github.com/advisories/GHSA-h25m-26qc-wcjf
+Next.js: HTTP request smuggling in rewrites - https://github.com/advisories/GHSA-ggv3-7p47-pfv8
+Next.js: Unbounded next/image disk cache growth can exhaust storage - https://github.com/advisories/GHSA-3x4c-7xq6-9pq8
+Next.js has a Denial of Service with Server Components - https://github.com/advisories/GHSA-q4gf-8mx6-v5v3
+Next.js Vulnerable to Denial of Service with Server Components - https://github.com/advisories/GHSA-8h8q-6873-q5fj
+Next.js's Middleware / Proxy redirects can be cache-poisoned - https://github.com/advisories/GHSA-3g8h-86w9-wvmq
+Next.js vulnerable to cross-site scripting in App Router applications using CSP nonces - https://github.com/advisories/GHSA-ffhc-5mcf-pf4q
+Next.js vulnerable to cache poisoning via collisions in React Server Component cache-busting - https://github.com/advisories/GHSA-vfv6-92ff-j949
+Next.js has cross-site scripting in beforeInteractive scripts with untrusted input - https://github.com/advisories/GHSA-gx5p-jg67-6x7h
+Next.js has a Denial of Service in the Image Optimization API - https://github.com/advisories/GHSA-h64f-5h5j-jqjh
+Next.js vulnerable to server-side request forgery in applications using WebSocket upgrades - https://github.com/advisories/GHSA-c4j6-fc7j-m34r
+Next.js vulnerable to cache poisoning in React Server Component responses - https://github.com/advisories/GHSA-wfc6-r584-vfw7
+Next.js has a Middleware / Proxy bypass in Pages Router applications using i18n - https://github.com/advisories/GHSA-36qx-fr4f-26g5
+Next.js: Denial of Service in App Router using Server Actions - https://github.com/advisories/GHSA-m99w-x7hq-7vfj
+Next.js: Server-Side Request Forgery in Server Actions on custom servers - https://github.com/advisories/GHSA-89xv-2m56-2m9x
+Next.js: Cache confusion of response bodies for requests with bodies - https://github.com/advisories/GHSA-68g3-v927-f742
+Next.js: Cache confusion of response bodies for requests with bodies containing invalid UTF-8 byte sequences - https://github.com/advisories/GHSA-4633-3j49-mh5q
+Next.js: Unbounded Server Action payload in Edge runtime - https://github.com/advisories/GHSA-4c39-4ccg-62r3
+Next.js: Server-Side Request Forgery in rewrites via attacker-controlled destination hostname - https://github.com/advisories/GHSA-p9j2-gv94-2wf4
+Next.js: Unauthenticated disclosure of internal Server Function endpoints - https://github.com/advisories/GHSA-955p-x3mx-jcvp
+Depends on vulnerable versions of postcss
+fix available via `npm audit fix --force`
+Will install next@16.2.12, which is a breaking change
+node_modules/next
+
+postcss  <=8.5.17
+Severity: high
+PostCSS has XSS via Unescaped </style> in its CSS Stringify Output - https://github.com/advisories/GHSA-qx2v-qp2m-jg93
+PostCSS: Arbitrary file read and information disclosure via attacker-controlled sourceMappingURL in CSS comments - https://github.com/advisories/GHSA-6g55-p6wh-862q
+PostCSS: Path Traversal in Previous Source Map Auto-Loading (sourceMappingURL) leads to Arbitrary .map File Disclosure - https://github.com/advisories/GHSA-r28c-9q8g-f849
+fix available via `npm audit fix --force`
+Will install next@16.2.12, which is a breaking change
+node_modules/next/node_modules/postcss
+
+18 vulnerabilities (2 moderate, 16 high)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force

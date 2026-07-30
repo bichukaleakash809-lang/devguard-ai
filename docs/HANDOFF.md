@@ -20,6 +20,17 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 
 `docs/04_TRACK_FINAL.md` remains **not to be executed** until the human says so.
 
+**Where post-T2 hardening stands against the owner's stated priority order:**
+
+| # | Priority | Status |
+|---|---|---|
+| 1 | Performance | Two real bottlenecks found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`), `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`). No further hot path identified by measurement — do not "optimise" without a number first. |
+| 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness and the `/scan` response contract all had proven defects, all fixed with failing-test-first (`0a7341d`, `7678d26`, `296f37d`). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
+| 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
+| 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
+| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
+| 6 | Test coverage | 58 → 150, contract and regression tests throughout. |
+
 ---
 
 ## T2 — WHAT IS DONE (4 phases, each committed and pushed)
@@ -207,11 +218,13 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 110 passing**, all with no API key, no collector, no network:
+**Test inventory — 150 passing**, all with no API key, no collector, no network.
+(Per-file counts below were last de-drifted at commit `90dd6fb`; re-derive with
+`pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
   bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
   length, no raw dicts across boundaries, empty code rejected before any LLM call
-- `test_audit_chain.py` (19) — tamper-evidence *demonstrated*, not asserted,
+- `test_audit_chain.py` (37) — tamper-evidence *demonstrated*, not asserted,
   plus the tail-read edge cases (empty/whitespace/corrupt/multi-chunk).
   In-place edit, code_hash swap, deletion, reordering and forged append are all
   caught. The key one: an attacker who recomputes the edited record's own hash
@@ -227,8 +240,11 @@ false-negative risk is real and stated.
 - `test_pipeline_loop.py` (11) — the reflection loop: convergence, retry with
   feedback threaded, exhaustion, both gate conditions independently, the `>=`
   boundary, and the clean-code short-circuit
-- `test_benchmark_harness.py` (8) — errored vs clean scans, partial outage
-  visibility, FP counting, metric bounds, negative control preserved
+- `test_benchmark_harness.py` (12) — errored vs clean scans, partial outage
+  visibility, FP counting, metric bounds, negative control preserved, and the
+  artifact's round trip through the API reader
+- `test_scan_response_contract.py` (18) — every published value on the Result
+  Dashboard is a measurement or explicitly absent; see the section below
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -266,6 +282,105 @@ on the grounds of clean-clone install size — **not** CI time, which is fine.
 **Operational note:** `cancel-in-progress` is correct, but it means pushing
 again while a run is in flight kills it. When a CI result is actually needed,
 push once and wait.
+
+### The `/scan` response published five unmeasured numbers (commit `296f37d`)
+
+The largest honesty defect found after T1, and it survived T1 because T1's
+fabrication sweep covered the Nexus panels and the landing page, not the Result
+Dashboard's own payload. Proven by 16 failing tests before any fix.
+
+`_build_frontend_result` is the single place internal pipeline objects become
+numbers a human reads. Five were constants:
+
+| Field | Was | Now |
+|---|---|---|
+| `benchmark_report` | `{accuracy: 0.9, precision: 0.92, recall: 0.88, false_positive_rate: 0.05, sample_size: 14}` — literals, rendered as an "Accuracy benchmark proof strip" on **every** scan while the README said no accuracy figures were published anywhere | read from an artifact a real run wrote, else `null` and the UI says "accuracy not measured" |
+| `audit_entry.chain_verified` | hard-coded `true`, rendering a green "✅ Chain Verified" tamper-evidence badge — and computed **before** `_finalize` appended the entry | `pending` / `written` / `failed`, with the real `prev_hash`/`entry_hash` |
+| the audit append itself | `asyncio.create_task(_finalize(...))` — docstring claimed synchronous, exceptions swallowed silently, and asyncio holds only a weak ref so the task could be collected before running | awaited; a failure logs and reports `chain_state: "failed"` |
+| `tokens_used` | literal `0` on every response, rendered as a "Tokens Used" metric | provider-reported sum across the agents; `null` when nothing counted them |
+| `cvss_before` / `cvss_after` | `{critical: 9.5, high: 7.8, …}` lookup and the constant `1.2`, both `.toFixed(1)` under a CVSS label | `severity_before`, the ordinal actually reported; no "after" because nothing re-scores the patch |
+
+Two integrity defects found while fixing those:
+
+1. **The LLM was being asked to author DevGuard's own measurements.** `FixResult`
+   and `ValidationResult` are built `Model(**data)` from LLM JSON, and the schema
+   handed to the model listed `model_used` (**required**) and `tokens_used`. So a
+   model could write the auditable routing record and the usage metric.
+   `_model_facing_schema` removes both from what the model sees;
+   `_strip_measured_fields` drops them from the parsed payload with a warning.
+   Demonstrated: a payload claiming `tokens_used: 999999` on
+   `model_used: "gpt-4-omniscient"` cannot reach the report.
+2. **The SigNoz CTA opened a 404.** `NEXT_PUBLIC_SIGNOZ_URL` fell back to
+   `https://cloud.signoz.io`, so "Investigate this trace in SigNoz" always
+   rendered and opened a `/trace/<id>` path on SigNoz's own site.
+   `frontend/.env.example` already documented the intended behaviour; the code
+   now matches it.
+
+`python -m backend.core.benchmark --json <path>` is now the **only** route from a
+run to a published number, and it refuses to write the artifact when any scan
+errored (`--allow-errored` overrides). `print_report` surfaces
+`errored_snippets` above the metrics instead of omitting it.
+
+Evidence: `docs/audit-evidence/t2/scan-response-fabrications.txt` (5 scenarios,
+all assertions passing). **Tests 128 → 150.**
+
+### Documentation accuracy (commit `90dd6fb`)
+
+Priority-4 pass. Each item checked against a running server or a real clone:
+
+- **`.env.example` re-enabled the unverified MCP path.** It shipped
+  `SIGNOZ_MCP_URL=http://localhost:8080`, so `cp .env.example .env` — the first
+  quickstart step — flipped `is_configured()` to `True` against a port nothing
+  serves, undoing the entire T2 MCP truth decision for anyone following the
+  README. Commented out.
+- **README "Reproducibility" claimed judges could "re-run the exact SigNoz
+  deployment used for this submission".** No such deployment exists;
+  `which foundryctl` exits 1. Replaced with what genuinely reproduces on a clean
+  checkout. Same claim removed from `DEMO_SCRIPT.md`.
+- **The README headline claimed MCP-backed self-observation and retracted it 100
+  lines later** under Limitations. Headline now states what the loop actually
+  reads.
+- **`DEPLOYMENT.md`'s pre-demo checklist named a field that does not exist** —
+  `/audit-log/verify` returning `chain_verified: true`. Verified live: the shape
+  is `{"valid": true, "entries_checked": 35, …}`.
+- "70 tests" → 150 in README and SECURITY.md. The README's claim that the
+  pipeline's end-to-end path is uncovered "because it needs a live LLM key" was
+  stale since `test_pipeline_loop.py`: the **orchestration** is covered; the
+  models' **judgement** is not.
+
+**README quickstart verified command by command** in a fresh clone of this branch
+from GitHub: `cp .env.example .env` (0), `python -m venv venv` (0),
+`pip install -r requirements.txt` (0), `python -m uvicorn backend.main:app
+--reload --port 8000` (HTTP 200), `cd frontend && npm install` (0),
+`npm run dev` (HTTP 200). `make doctor` exits 0. `scripts/verify_otel.py` still
+PASSES against the changed scan path.
+
+**Correcting my own earlier overstatement.** AUDIT.md B3 said an orphaned
+`signoz-system` gitlink makes `git clone --recurse-submodules` "error" and that a
+clean clone "hits this immediately". Measured on real clones: recursive clone
+exits **0** and leaves the directory empty — a clean clone succeeds. Only
+`git submodule update --init` and `git submodule status` fail (exit 128).
+Severity downgraded **Critical → Low**.
+
+### Frontend dependency advisories — found, triaged, NOT actioned
+
+18 advisories (16 high, 2 moderate) in `next` and its nested `postcss`. `next`
+resolves to **14.2.35, the latest 14.x — no in-range fix exists**; the only
+remedy is `next@16`, a breaking major upgrade.
+
+Triaged rather than counted. Verified absent from this app: `middleware.*`, any
+`"use server"`, i18n config, rewrites, a Pages Router — and all five routes build
+fully static. That structurally excludes the four Server-Action advisories and
+the two Pages-Router/rewrite ones; the three `postcss` ones need
+attacker-controlled CSS at build time and the app's own top-level `postcss`
+(8.5.19) is already patched. **Genuinely applicable: the response/RSC
+cache-confusion class** (GHSA-wfc6-r584-vfw7, GHSA-68g3-v927-f742,
+GHSA-4633-3j49-mh5q), against a static frontend serving no user-specific
+responses.
+
+**Not changed** — §13.1 forbids dependency changes without approval. Recorded in
+SECURITY.md and as open issue 9. Evidence:
+`docs/audit-evidence/t2/frontend-dependency-advisories.txt`.
 
 ---
 
@@ -340,19 +455,34 @@ broken by a dependency pin conflict.
 
 ## VERIFICATION — full gate, re-run at end of T2
 
+Re-run every line before reporting anything green. Last observed at `90dd6fb`:
+
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest                                       -> 15 passed
+pytest tests/                                -> 150 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
+make doctor                                  -> exit 0, all required checks passed
+npx tsc --noEmit                             -> clean
 npm run build                                -> Compiled successfully, 7/7 pages
 npm run lint                                 -> No ESLint warnings or errors
 docker compose --profile obs config          -> valid
+GET /audit-log/verify                         -> {"valid": true, "entries_checked": 35}
+GET /telemetry-status                         -> signoz_mcp.configured: false
 ```
 
+Fresh clone from GitHub, README quickstart command by command: `cp .env.example
+.env` (0) · `python -m venv venv` (0) · `pip install -r requirements.txt` (0) ·
+`uvicorn backend.main:app --reload` (HTTP 200) · `npm install` (0) ·
+`npm run dev` (HTTP 200).
+
 Evidence on disk: `docs/audit-evidence/t2/` —
-`registry-egress-block.txt`, `telemetry-status-unconfigured.json`,
-`mcp-unconfigured-behaviour.txt`, `otel-verification.json`,
-`pytest-failsafe.txt`, `otel-collector-config-validation.txt`.
+`registry-egress-block.txt`, `registry-egress-diagnosis.txt`,
+`telemetry-status-unconfigured.json`, `mcp-unconfigured-behaviour.txt`,
+`otel-verification.json`, `pytest-failsafe.txt`,
+`otel-collector-config-validation.txt`, `rag-dependency-finding.txt`,
+`pipeline-defects.txt`, `benchmark-defect.txt`, `audit-performance.txt`,
+`audit-endpoint-performance.txt`, `scan-response-fabrications.txt`,
+`frontend-dependency-advisories.txt`.
 
 ---
 
@@ -362,8 +492,10 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
-python -m pytest
-python scripts/verify_otel.py
+make doctor
+python -m pytest tests/          # expect 150 passed
+python scripts/verify_otel.py    # expect PASSED
+(cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
 # The moment the registry egress policy allows Docker Hub, T2's remaining
 # three sections become executable — the collector config already exists:
@@ -389,8 +521,11 @@ Blocking first:
    optional accelerators with a working fallback. Needs approval per §6. **Cut
    them only after the explicit instrumentation pins added in T1 phase 1** —
    `chromadb` was transitively supplying `opentelemetry-instrumentation-fastapi`.
-5. **Delete the orphaned `signoz-system` gitlink?** No `.gitmodules`, breaks
-   `git clone --recurse-submodules`. Recommend: delete.
+5. **Delete the orphaned `signoz-system` gitlink?** No `.gitmodules`. Measured:
+   a recursive clone exits 0 and leaves the directory empty, so this does **not**
+   break a clean clone (AUDIT.md B3 corrected, Critical → Low). Only
+   `git submodule update --init` / `status` fail. Cosmetic. Recommend: delete —
+   but it needs approval per §6, which is why it is still here.
 6. **Agent roster count.** Contracts disagree: 12 (`03_CORE_CONTRACT.md` §5),
    11 (`02_ADDENDUM.md` Part D), and a third set in `01_PLATFORM_MASTER.md` §6.
    Must be settled before any UI renders it. Recommend 12.
@@ -399,6 +534,13 @@ Blocking first:
    hackathon (README says *Agents of SigNoz*, contracts say *Build with
    DataHub*). Note `9651db3` cited in `01_PLATFORM_MASTER.md` does not exist in
    this repo's history.
+9. **Upgrade `next` 14 → 16?** 18 open advisories (16 high) and `next` is already
+   at the newest 14.x, so there is no in-range fix. Most are structurally
+   unreachable in this app; the response/RSC cache-confusion class is not. A
+   two-major upgrade needs approval and its own verification pass — `tsc`,
+   `next build`, `next lint`, and a manual pass over all five routes. Do not fold
+   it into an unrelated change. Evidence:
+   `docs/audit-evidence/t2/frontend-dependency-advisories.txt`.
 
 ---
 
@@ -414,8 +556,20 @@ Blocking first:
 - Do not claim a capability in a commit message before implementing it. This
   happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
   `f3bb8e5`.
+- **Re-derive test counts, do not copy them.** This file has drifted three times
+  (58 → 110 → 128 → 150). Run `pytest tests/ -q --collect-only` before writing a
+  number anywhere.
+- **A hard-coded value is a fabrication even when it is plausible.** Five of them
+  reached the primary result screen and survived T1's sweep because that sweep
+  looked at components, not at the API payload feeding them. When auditing for
+  fabrication, start from what the response body contains, not from what the
+  JSX renders.
+- Do not correct docs from prose. Every claim fixed in `90dd6fb` was checked
+  against a running server or a real clone first; two of them (the submodule
+  behaviour, the `/audit-log/verify` field name) turned out different from what
+  the docs *and* an earlier audit row asserted.
 - Work on branch `claude/track-t0-audit-evgu8j`.
 
 ---
 
-*Last updated: 2026-07-29, post-T2 hardening. HEAD: `2ff27c4`.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `90dd6fb` + this update.*

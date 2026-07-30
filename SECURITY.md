@@ -78,6 +78,25 @@ These are real and should be treated as open:
 - **Docker images do not build**, so the non-root user and reduced attack surface
   described in `backend/Dockerfile` are not in effect anywhere. Blocked on
   container-registry access; see `docs/audit-evidence/t2/registry-egress-block.txt`.
+- **18 open advisories in the frontend dependency tree** (16 high, 2 moderate),
+  all in `next` and in the `postcss` nested inside it. `next` resolves to
+  **14.2.35 — the latest 14.x — so there is no in-range fix**; the only remedy is
+  a breaking upgrade to `next@16`, which needs owner approval and its own
+  verification pass, so nothing has been changed.
+
+  Triaged rather than counted, because the raw number overstates the exposure.
+  Verified absent from this app: `middleware.*`, any `"use server"` directive,
+  i18n config, rewrites, and a Pages Router — and all five routes build as fully
+  prerendered static. That structurally excludes the four Server-Action/Server-
+  Function advisories and the two Pages-Router/rewrite ones. The three `postcss`
+  advisories need attacker-controlled CSS *source* at build time, and the app's
+  own top-level `postcss` (8.5.19) is already patched. What remains genuinely
+  applicable is the response/RSC **cache-confusion** class (GHSA-wfc6-r584-vfw7,
+  GHSA-68g3-v927-f742, GHSA-4633-3j49-mh5q), against a static frontend that
+  serves no user-specific responses.
+
+  Full per-advisory reasoning and the raw `npm audit` output:
+  `docs/audit-evidence/t2/frontend-dependency-advisories.txt`.
 
 ## Dependencies
 
