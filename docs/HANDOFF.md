@@ -1317,8 +1317,13 @@ finding.
 
 **What is left is all blocked, on one of exactly three things:**
 
-1. **The registry egress policy** — T2 §6.1, §6.3 (SigNoz UI screenshot), §6.6,
-   and the Docker build (AUDIT B1/B2/A1). One allowlisted CDN host unblocks it.
+1. **The SigNoz deployment tool** — T2 §6.1, §6.3 (SigNoz UI screenshot), §6.6.
+   **No longer the images:** all eight pull successfully through the
+   already-allowed `mirror.gcr.io`, digest-identical to Docker Hub. What is left
+   is `foundryctl`, blocked by two *different* controls — `signoz.io` (egress
+   allowlist) and `github.com/SigNoz/foundry` (session repo-scope, needs
+   `add_repo`). The Docker build (AUDIT B1/B2/A1) is unblocked by the mirror.
+   See "REGISTRY BLOCKER — ROOT CAUSE FOUND" above.
 2. **A live `GROQ_API_KEY`** — no scan has ever run against a real LLM, so nothing
    measures whether the Scanner finds real vulnerabilities or the Fixer writes
    correct patches. That also gates the benchmark artifact,
@@ -1395,9 +1400,151 @@ this session (29.3.1), and resources are adequate (21 GB disk, 15 GB RAM vs
 SigNoz's ~4–6 GB). `otel-collector-config.yaml` already exists, so
 `docker compose --profile obs up` becomes runnable immediately.
 
+> **SUPERSEDED — an allowlist change turned out NOT to be required.** A later
+> pass found that `mirror.gcr.io`, a Docker Hub pull-through cache, is **already
+> on the allowlist** and serves blobs from its own hostname. All eight images
+> were pulled successfully and verified digest-identical to Docker Hub. See
+> "REGISTRY BLOCKER — ROOT CAUSE FOUND, IMAGES NOW OBTAINABLE" below. The
+> allowlist entry above remains the correct fix if the owner would rather fix
+> the policy than route through a mirror.
+
 Side note: `huggingface.co` is also blocked, which explains why the semantic RAG
 embedder could never fetch `all-MiniLM-L6-v2` — though that path is independently
 broken by a dependency pin conflict.
+
+---
+
+## REGISTRY BLOCKER — ROOT CAUSE FOUND, IMAGES NOW OBTAINABLE
+
+Full evidence: **`docs/audit-evidence/t2/registry-egress-root-cause.txt`**.
+This section corrects two things in the diagnosis above; both are corrections,
+not refinements.
+
+### Root cause, restated precisely
+
+The egress gateway is a default-deny allowlist. Docker Hub's **API and auth
+hosts are allowed**; its **blob CDN host is not**. Every `docker pull`
+therefore authenticates, resolves the manifest, and then dies on the layer
+fetch. The error says so if you read it:
+
+```
+$ docker pull signoz/signoz:latest
+latest: Pulling from signoz/signoz            <- auth OK, manifest OK
+failed to copy: ... Get "https://production.cloudfront.docker.com/registry-v2/
+  docker/registry/v2/blobs/sha256/2e/2ea27df6a5ba.../data?Expires=...
+  &Signature=...": Forbidden                  <- OUR gateway refused the tunnel
+EXIT 1
+```
+
+Docker Hub **issued a signed CloudFront URL** — it authorized the download. Our
+own gateway refused the tunnel. Nothing about Docker, DNS, TLS, credentials, or
+this repository is implicated:
+
+| Layer | Verdict | How it was ruled out |
+|---|---|---|
+| DNS | not the cause | every name resolves, denied ones included |
+| TLS / certs | not the cause | refused at CONNECT, **before** any handshake — no cert is ever presented |
+| Docker Hub auth | not the cause | no credentials configured at all, yet anonymous tokens + manifests succeeded for all 8 images. Credentials would **not** help — an authenticated pull hits the same denied CDN |
+| Local firewall | not the cause | local proxy accepts and issues CONNECT; the **upstream** gateway answers 403 |
+| Docker | not the cause | daemon starts clean (29.3.1, overlayfs) and honours `HTTPSProxy` |
+
+**Exactly one blob host is involved.** Derived from the registry rather than
+assumed — each image walked token → manifest → amd64 child → first layer, with
+redirects not followed:
+
+all 8 images (`signoz/signoz`, `signoz-otel-collector`, `signoz-mcp-server`,
+`postgres:16`, `clickhouse-keeper:25.12.5`, `clickhouse-server:25.12.5`,
+`redis:7-alpine`, `otel/opentelemetry-collector-contrib:0.96.0`) → HTTP 307 →
+**`production.cloudfront.docker.com`**. One host, for the whole stack.
+
+### The finding that changes the answer
+
+**`mirror.gcr.io` is already allowed**, and unlike Docker Hub it does not
+redirect blobs to a separate CDN — its redirect is *relative*, so bytes come
+from the same allowed host. Verified by downloading a real 3,623,904-byte layer
+and checking its SHA-256 (matched), then by comparing `Docker-Content-Digest`
+per image: **all 8 byte-identical to Docker Hub**, so it is a true pull-through
+cache, not a fork — §6.1's "pinned version" requirement is not weakened.
+
+**All eight images pulled successfully, 3.93 GB, every one EXIT 0.**
+
+This is **not** evading the policy: `mirror.gcr.io` is a host the policy
+*allows*. TLS verification was not disabled, `HTTPS_PROXY` was not unset, and
+the gateway was not routed around.
+
+### Minimum change — verified, and it touches no repository file
+
+```json
+/etc/docker/daemon.json
+{
+  "registry-mirrors": ["https://mirror.gcr.io"]
+}
+```
+
+Controlled before/after, the **same** command minutes apart:
+
+| | `docker pull redis:7-alpine` |
+|---|---|
+| **before** | `...production.cloudfront.docker.com...: Forbidden` — **EXIT 1** |
+| **after** | `Downloaded newer image for redis:7-alpine` → `docker.io/library/redis:7-alpine` — **EXIT 0** |
+
+The resulting tag is the **canonical** name and the digest is Docker Hub's, so
+`casting.yaml.lock` and `docker-compose.yml` need **no edit**. Confirmed for a
+namespaced image too (`signoz/signoz:latest` → `docker.io/signoz/signoz:latest`,
+digest `sha256:9b0ea7ad6648…`).
+
+**Caveat:** this container is ephemeral. `daemon.json` is environment state, does
+not survive a new session, and nothing in this repo recreates it. It is a
+per-session setup step, not a committed fix.
+
+### What is STILL blocked for §6.1 — and it is no longer the images
+
+`casting.yaml` / `casting.yaml.lock` are SigNoz **Foundry** manifests driven by
+`foundryctl`, which is not installed. Both install routes are shut, **for two
+different reasons**:
+
+1. `curl -fsSL https://signoz.io/foundry.sh | bash` — `signoz.io` is **denied by
+   the egress gateway**.
+2. `github.com/SigNoz/foundry/releases/latest/download/foundry_linux_amd64.tar.gz`
+   — 403, but **not** from the egress gateway.
+
+**Correcting the earlier evidence, which conflated these:** the `github.com` 403
+is the **session repo-scope** control, not the egress allowlist. Proof —
+`github.com/akashbichukale111/devguard-ai` returns **200** while
+`github.com/SigNoz/foundry` and `github.com/torvalds/linux` return **403** with
+`{"message": "GitHub access to this repository is not enabled for this session.
+Use add_repo to request access…"}`, and `github.com` **never appears** in the
+gateway's `recentRelayFailures`. Its remedy is `add_repo`, not an allowlist
+entry. Note `raw.githubusercontent.com` is *not* subject to it — SigNoz's README
+and getting-started docs were read from there at HTTP 200.
+
+SigNoz Cloud is not an escape either: `ingest.us.signoz.cloud`, `us.signoz.cloud`,
+`signoz.io`, `www.signoz.io` all denied by the gateway.
+
+### Is it local, CI, Codespaces, or environment-specific?
+
+**Environment-specific** — this Claude execution environment's egress policy.
+`example.com` is denied by the same gateway (and logged in
+`recentRelayFailures`), which proves default-deny rather than Docker being
+singled out. **Not verified, and deliberately not asserted:** whether GitHub
+Actions runners can pull these images. Runners normally have unrestricted
+egress and this repo's CI reaches pypi/npm, but neither proves Docker Hub's CDN
+is reachable from a runner. One step in a scratch workflow settles it:
+`- run: docker pull signoz/signoz:latest`.
+
+### Owner decision required
+
+The registry blocker is resolved **as a diagnosis**. §6.1/§6.3/§6.6 are **not**
+declared unblocked, because standing SigNoz up still needs `foundryctl`. Two
+ways forward, both the owner's call:
+
+1. **Unblock `foundryctl`** — allowlist `signoz.io` (also fixes the SigNoz Cloud
+   route), or grant `SigNoz/foundry` via `add_repo` for the release archive.
+2. **Approve a non-Foundry deployment** of the already-downloaded images. This
+   is a deployment-approach change away from the pinned `casting.yaml`, so it is
+   not something to take unilaterally.
+
+Not proceeding further without that decision.
 
 ---
 
@@ -1425,6 +1572,7 @@ Fresh clone from GitHub, README quickstart command by command: `cp .env.example
 
 Evidence on disk: `docs/audit-evidence/t2/` —
 `registry-egress-block.txt`, `registry-egress-diagnosis.txt`,
+`registry-egress-root-cause.txt`,
 `telemetry-status-unconfigured.json`, `mcp-unconfigured-behaviour.txt`,
 `otel-verification.json`, `pytest-failsafe.txt`,
 `otel-collector-config-validation.txt`, `rag-dependency-finding.txt`,
@@ -1449,8 +1597,12 @@ python -m pytest tests/          # expect 301 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
-# The moment the registry egress policy allows Docker Hub, T2's remaining
-# three sections become executable — the collector config already exists:
+# The IMAGE blocker is now solved via the mirror (see "REGISTRY BLOCKER — ROOT
+# CAUSE FOUND"): otel/opentelemetry-collector-contrib:0.96.0 pulls successfully,
+# and the collector config already exists. NOT yet verified that this compose
+# command runs green end to end — it also builds backend/frontend, and those
+# Dockerfiles are independently broken (AUDIT B1/B2). Full SigNoz
+# (§6.1/§6.3/§6.6) still needs foundryctl, which is separately blocked.
 docker compose --profile obs up -d
 docker compose logs otel-collector      # debug exporter shows arriving spans
 ```
@@ -1461,9 +1613,15 @@ docker compose logs otel-collector      # debug exporter shows arriving spans
 
 Blocking first:
 
-1. **Registry egress policy (blocks the rest of T2, and T6/DataHub later).**
-   Allowlist Docker Hub, or accept that §6.1/§6.3/§6.6 stay open and decide
-   whether T2 counts as closed without them. **This is the decision to make.**
+1. **SigNoz deployment tool (blocks the rest of T2).** ~~Allowlist Docker Hub~~
+   — **the image blocker is solved**: all eight pull through the already-allowed
+   `mirror.gcr.io`, digest-identical to Docker Hub, via a 3-line
+   `/etc/docker/daemon.json` and **no repository change**. What remains is
+   `foundryctl`: allowlist `signoz.io` (also restores the SigNoz Cloud route),
+   **or** grant `SigNoz/foundry` via `add_repo`, **or** approve deploying the
+   downloaded images by a non-Foundry route (a deployment-approach change away
+   from the pinned `casting.yaml`). Failing all three, decide whether T2 counts
+   as closed without §6.1/§6.3/§6.6. **This is the decision to make.**
 2. **No Groq API key.** No live LLM scan has ever run, in any session. The
    Scanner's end-to-end path and `verify_otel.py --require-agent-spans` are
    both unexercised because of it.
