@@ -49,8 +49,17 @@ interface SloStatus {
 interface AuditEntry {
   scan_id: string;
   code_hash: string;
-  prev_hash: string;
-  chain_verified: boolean; // sourced from /audit-log/verify
+  // Null until the entry is actually written. The backend used to send
+  // `prev_hash: ""` and `chain_verified: true` unconditionally — computed
+  // BEFORE the append ran — so this panel showed a green "Chain Verified" badge
+  // for a record that did not exist yet. Three states now:
+  //   "pending" -> not written (critical/high scans wait at the approval gate)
+  //   "written" -> real hashes, this record IS chained
+  //   "failed"  -> the append raised; this scan is NOT in the audit log
+  prev_hash: string | null;
+  entry_hash: string | null;
+  chain_verified: boolean | null;
+  chain_state: "pending" | "written" | "failed";
 }
 
 interface BenchmarkReport {
@@ -59,6 +68,7 @@ interface BenchmarkReport {
   recall: number;
   false_positive_rate: number;
   sample_size: number;
+  generated_at?: number; // unix seconds; when the harness actually ran
 }
 
 interface ScanResult {
@@ -67,34 +77,61 @@ interface ScanResult {
   language: string;
   vulnerabilities: Vulnerability[];
   eval_score: number;
-  cvss_before: number;
-  cvss_after: number;
+  // The Scanner reports a severity BAND, not a scored CVSS vector. This was
+  // `cvss_before`/`cvss_after` from a hard-coded {critical: 9.5, high: 7.8, ...}
+  // lookup plus the constant 1.2, rendered to one decimal under a "CVSS" label.
+  // There is no "after" value because nothing re-scores the patched code.
+  severity_before: SeverityBand | null;
   retry_history: RetryAttempt[];
   model_routing: ModelRouting;
   latency_ms: number;
-  tokens_used: number;
+  tokens_used: number | null; // null = nothing counted them; never a measured 0
   cost_usd: number;
   slo_status: SloStatus;
   audit_entry: AuditEntry;
-  benchmark_report: BenchmarkReport;
+  benchmark_report: BenchmarkReport | null; // null until the harness has run
   trace_id: string;
   spans: TraceSpan[]; // integration: backend exposes span data via the same OTEL store SigNoz reads
   status: "complete" | "pending_approval" | "processing" | "error";
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-const SIGNOZ_URL =
-  process.env.NEXT_PUBLIC_SIGNOZ_URL ?? "https://cloud.signoz.io";
+/* Deliberately NOT defaulted. `frontend/.env.example` documents "Leave unset if
+   you are not running SigNoz — the link is simply not shown", but this fell back
+   to `https://cloud.signoz.io`, so "Investigate this trace in SigNoz" always
+   rendered and opened SigNoz's own site at a /trace/<id> path that host knows
+   nothing about. A dead link on the proof CTA is worse than no CTA, so the
+   button is now gated on the variable actually being configured. */
+const SIGNOZ_URL = process.env.NEXT_PUBLIC_SIGNOZ_URL?.trim() || null;
+
+function signozTraceUrl(traceId: string, scanId: string): string | null {
+  return SIGNOZ_URL ? `${SIGNOZ_URL}/trace/${traceId}?scan_id=${scanId}` : null;
+}
 
 /* -------------------------------------------------------------------------- */
-/*  SEVERITY / CVSS HELPERS                                                    */
+/*  SEVERITY HELPERS                                                           */
+/*                                                                            */
+/*  This was `cvssBand(score: number)`, fed by `cvss_before`/`cvss_after` —    */
+/*  which the backend produced from a hard-coded {critical: 9.5, high: 7.8,    */
+/*  medium: 5.5, low: 3.0} lookup plus the constant 1.2 for "after". Rendering */
+/*  those with `.toFixed(1)` under a CVSS label claimed a scored CVSS vector   */
+/*  for code nobody scored. The Scanner reports a severity *band*, so the band */
+/*  is what this styles, under its own name.                                   */
 /* -------------------------------------------------------------------------- */
 
-function cvssBand(score: number): { label: string; color: string; bg: string } {
-  if (score >= 9) return { label: "CRITICAL", color: "text-red-300", bg: "bg-red-500/15 border-red-500/30" };
-  if (score >= 7) return { label: "HIGH", color: "text-orange-300", bg: "bg-orange-500/15 border-orange-500/30" };
-  if (score >= 4) return { label: "MEDIUM", color: "text-amber-300", bg: "bg-amber-500/15 border-amber-500/30" };
-  return { label: "LOW", color: "text-emerald-300", bg: "bg-emerald-500/15 border-emerald-500/30" };
+type SeverityBand = "critical" | "high" | "medium" | "low";
+
+const SEVERITY_STYLES: Record<SeverityBand, { label: string; color: string; bg: string }> = {
+  critical: { label: "CRITICAL", color: "text-red-300", bg: "bg-red-500/15 border-red-500/30" },
+  high: { label: "HIGH", color: "text-orange-300", bg: "bg-orange-500/15 border-orange-500/30" },
+  medium: { label: "MEDIUM", color: "text-amber-300", bg: "bg-amber-500/15 border-amber-500/30" },
+  low: { label: "LOW", color: "text-emerald-300", bg: "bg-emerald-500/15 border-emerald-500/30" },
+};
+
+const NEUTRAL_STYLE = { label: "NONE", color: "text-white/50", bg: "bg-white/5 border-white/10" };
+
+function severityStyle(band: SeverityBand | null) {
+  return band ? SEVERITY_STYLES[band] ?? NEUTRAL_STYLE : NEUTRAL_STYLE;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -378,8 +415,8 @@ function ResultDashboard() {
       />
     );
 
-  const before = cvssBand(result.cvss_before);
-  const after = cvssBand(result.cvss_after);
+  const before = severityStyle(result.severity_before);
+  const traceUrl = signozTraceUrl(result.trace_id, result.audit_entry.scan_id);
   const cweList = result.vulnerabilities.map((v) => v.cwe).join(", ");
   const bench = result.benchmark_report;
   const lastAttempt = result.retry_history[result.retry_history.length - 1];
@@ -412,13 +449,20 @@ function ResultDashboard() {
             <h1 className="text-2xl font-semibold tracking-tight">Scan Report</h1>
             <p className="mt-1 font-mono text-xs text-white/40">scan_id: {result.audit_entry.scan_id}</p>
           </div>
-          {/* Security Score Delta — Before → After */}
+          {/* Highest severity found → the Validator's score for the patch.
+              This was a "Security Score Delta" showing CVSS 9.5 → 1.2. Neither
+              number was measured: both came from lookup tables in the backend,
+              and nothing anywhere re-scores the patched code, so there was no
+              "after" to show. What DOES exist is the severity band the Scanner
+              reported and the eval_score the Validator gave the fix — two
+              different measurements, now labelled as themselves. */}
           <div className="glow-card flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-3 backdrop-blur-xl">
-            <div className={`rounded-lg border px-3 py-1.5 text-center ${before.bg}`}>
-              <div className={`text-lg font-bold tabular-nums ${before.color}`}>{result.cvss_before.toFixed(1)}</div>
-              <div className={`text-[10px] font-semibold tracking-wide ${before.color}`}>{before.label}</div>
+            <div className="text-center">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">Highest severity</div>
+              <div className={`rounded-lg border px-3 py-1.5 ${before.bg}`}>
+                <div className={`text-sm font-bold tracking-wide ${before.color}`}>{before.label}</div>
+              </div>
             </div>
-            {/* Animated arrow drawing the eye from danger → safety */}
             <motion.svg
               width="40" height="20" viewBox="0 0 40 20" fill="none"
               initial={{ x: -6, opacity: 0 }} animate={{ x: 0, opacity: 1 }}
@@ -427,9 +471,13 @@ function ResultDashboard() {
               <path d="M2 10h30M28 5l6 5-6 5" stroke="url(#g)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               <defs><linearGradient id="g" x1="0" x2="40"><stop stopColor="#fb923c" /><stop offset="1" stopColor="#34d399" /></linearGradient></defs>
             </motion.svg>
-            <div className={`rounded-lg border px-3 py-1.5 text-center ${after.bg}`}>
-              <div className={`text-lg font-bold tabular-nums ${after.color}`}>{result.cvss_after.toFixed(1)}</div>
-              <div className={`text-[10px] font-semibold tracking-wide ${after.color}`}>{after.label}</div>
+            <div className="text-center">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">Validator score</div>
+              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5">
+                <div className="text-sm font-bold tabular-nums text-white/80">
+                  {result.eval_score > 0 ? `${result.eval_score}/100` : "n/a"}
+                </div>
+              </div>
             </div>
           </div>
         </motion.div>
@@ -529,17 +577,28 @@ function ResultDashboard() {
             {/* Three CountUp metric cards */}
             <motion.div variants={item} className="grid grid-cols-1 gap-4 sm:grid-cols-3 lg:grid-cols-1">
               <div className="glow-card rounded-2xl">
+                {/* `baselineNote` used to read "38% faster than manual review".
+                    No manual-review baseline was ever measured, so there was
+                    nothing to be 38% faster than. The measured value stands on
+                    its own. */}
                 <MetricCard
                   index={0} label="Latency" value={result.latency_ms} suffix=" ms"
                   decimals={0} icon={<IconClock />} accent="cyan"
-                  baselineNote="38% faster than manual review"
+                  baselineNote="wall-clock, this request"
                 />
               </div>
               <div className="glow-card glow-card--accent rounded-2xl">
+                {/* null when the provider reported no usage — rendering 0 would
+                    claim a scan consumed no tokens, which is never true. */}
                 <MetricCard
-                  index={1} label="Tokens Used" value={result.tokens_used}
+                  index={1} label="Tokens Used"
+                  value={result.tokens_used ?? 0}
                   decimals={0} icon={<IconChip />} accent="violet"
-                  baselineNote="severity-routed for token efficiency"
+                  baselineNote={
+                    result.tokens_used === null
+                      ? "not reported by the provider"
+                      : "prompt + completion, all agents"
+                  }
                 />
               </div>
               <div className="glow-card rounded-2xl">
@@ -625,46 +684,74 @@ function ResultDashboard() {
                 <div className="mt-0.5 text-xs text-white/40">
                   Span-level detail isn&apos;t available in this response yet.
                 </div>
+                <div className="mt-1 font-mono text-[11px] text-white/30">
+                  trace_id: {result.trace_id}
+                </div>
               </div>
-              <button
-                onClick={() =>
-                  window.open(`${SIGNOZ_URL}/trace/${result.trace_id}?scan_id=${result.audit_entry.scan_id}`, "_blank", "noopener")
-                }
-                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3.5 py-2 text-xs font-medium text-cyan-200 transition hover:bg-cyan-500/15"
-              >
-                Full trace available in SigNoz
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M7 17L17 7M17 7H8M17 7v9" />
-                </svg>
-              </button>
+              {traceUrl ? (
+                <button
+                  onClick={() => window.open(traceUrl, "_blank", "noopener")}
+                  className="flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3.5 py-2 text-xs font-medium text-cyan-200 transition hover:bg-cyan-500/15"
+                >
+                  Full trace available in SigNoz
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M7 17L17 7M17 7H8M17 7v9" />
+                  </svg>
+                </button>
+              ) : null}
             </div>
           )}
         </motion.div>
 
-        {/* ---- Accuracy benchmark proof strip ---- */}
+        {/* ---- Accuracy benchmark strip ----
+            Rendered ONLY when a real harness run left an artifact on disk. This
+            block used to show "90% Accuracy · 92% Precision · 88% Recall · 5%
+            False Positive Rate (n=14 OWASP snippets)" on every scan, from
+            literals hard-coded in the backend response — a "proof strip" that
+            proved nothing. Run `python -m backend.core.benchmark --json
+            data/benchmark_report.json` to populate it. */}
         <motion.div
           variants={item}
           className="rounded-xl border border-cyan-400/20 bg-gradient-to-r from-cyan-500/10 via-transparent to-transparent px-5 py-3 backdrop-blur-xl"
         >
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-            <span className="font-semibold text-cyan-200">Scanner Agent —</span>
-            <span className="text-white/80">{Math.round(bench.accuracy * 100)}% Accuracy</span>
-            <span className="text-white/30">·</span>
-            <span className="text-white/80">{Math.round(bench.precision * 100)}% Precision</span>
-            <span className="text-white/30">·</span>
-            <span className="text-white/80">{Math.round(bench.recall * 100)}% Recall</span>
-            <span className="text-white/30">·</span>
-            <span className="text-white/80">{Math.round(bench.false_positive_rate * 100)}% False Positive Rate</span>
-            <span className="text-white/40">(n={bench.sample_size} OWASP snippets)</span>
-          </div>
+          {bench ? (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              <span className="font-semibold text-cyan-200">Scanner Agent —</span>
+              <span className="text-white/80">{Math.round(bench.accuracy * 100)}% Accuracy</span>
+              <span className="text-white/30">·</span>
+              <span className="text-white/80">{Math.round(bench.precision * 100)}% Precision</span>
+              <span className="text-white/30">·</span>
+              <span className="text-white/80">{Math.round(bench.recall * 100)}% Recall</span>
+              <span className="text-white/30">·</span>
+              <span className="text-white/80">{Math.round(bench.false_positive_rate * 100)}% False Positive Rate</span>
+              <span className="text-white/40">(n={bench.sample_size} labelled snippets)</span>
+              {bench.generated_at ? (
+                <span className="text-white/30">
+                  measured {new Date(bench.generated_at * 1000).toLocaleDateString()}
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              <span className="font-semibold text-cyan-200">Scanner Agent —</span>
+              <span className="text-white/60">accuracy not measured</span>
+              <span className="text-white/30">·</span>
+              <span className="font-mono text-xs text-white/40">
+                python -m backend.core.benchmark --json data/benchmark_report.json
+              </span>
+            </div>
+          )}
         </motion.div>
 
-        {/* ---- Investigate in SigNoz CTA ---- */}
+        {/* ---- Investigate in SigNoz CTA ----
+            Only when NEXT_PUBLIC_SIGNOZ_URL is set. Without it there is no
+            SigNoz to investigate in, and the button used to open
+            cloud.signoz.io/trace/<id> — a 404 on someone else's site, dressed
+            as this project's proof. */}
+        {traceUrl ? (
         <motion.div variants={item}>
           <button
-            onClick={() =>
-              window.open(`${SIGNOZ_URL}/trace/${result.trace_id}?scan_id=${result.audit_entry.scan_id}`, "_blank", "noopener")
-            }
+            onClick={() => window.open(traceUrl, "_blank", "noopener")}
             className="group relative w-full overflow-hidden rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-6 py-4 text-center transition hover:bg-cyan-500/15"
           >
             <span className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-cyan-400/20 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
@@ -676,6 +763,7 @@ function ResultDashboard() {
             </span>
           </button>
         </motion.div>
+        ) : null}
 
         {/* ---- Immutable audit trail footer ---- */}
         <motion.div variants={item} className="rounded-xl border border-white/10 bg-black/30 px-4 py-3 backdrop-blur-xl">
@@ -683,10 +771,22 @@ function ResultDashboard() {
             <span className="text-white/30">COMPLIANCE RECORD</span>
             <span>scan_id: {truncate(result.audit_entry.scan_id)}</span>
             <span>code_hash: {truncate(result.audit_entry.code_hash)}</span>
-            <span>prev_hash: {truncate(result.audit_entry.prev_hash)}</span>
-            <span className={result.audit_entry.chain_verified ? "text-emerald-300" : "text-red-300"}>
-              {result.audit_entry.chain_verified ? "✅ Chain Verified" : "⚠ Chain Broken"}
-            </span>
+            {result.audit_entry.prev_hash ? (
+              <span>prev_hash: {truncate(result.audit_entry.prev_hash)}</span>
+            ) : null}
+            {/* Three states, because `chain_verified` is now nullable. It was
+                previously a hard-coded `true` from the backend, computed before
+                the audit entry was even written — so this badge read "✅ Chain
+                Verified" for a record that did not exist. "Pending" is not
+                "broken": a critical/high scan waits at the approval gate and
+                has legitimately not been written yet. */}
+            {result.audit_entry.chain_state === "written" ? (
+              <span className="text-emerald-300">✅ Chain Verified</span>
+            ) : result.audit_entry.chain_state === "failed" ? (
+              <span className="text-red-300">⚠ Audit write FAILED — this scan is not in the chain</span>
+            ) : (
+              <span className="text-amber-300">◌ Audit entry pending approval</span>
+            )}
           </div>
         </motion.div>
       </motion.div>

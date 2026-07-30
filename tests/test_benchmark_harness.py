@@ -176,3 +176,85 @@ def test_per_snippet_detail_covers_the_whole_corpus(monkeypatch):
     assert len(report.per_snippet) == len(benchmark.BENCHMARK_SET)
     ids = {s["id"] for s in report.per_snippet}
     assert ids == {i["id"] for i in benchmark.BENCHMARK_SET}
+
+
+# --------------------------------------------------------------------------- #
+# The artifact — the only sanctioned route from a run to a published number
+# --------------------------------------------------------------------------- #
+
+def test_the_artifact_carries_every_metric_the_api_requires():
+    """`_load_benchmark_artifact` drops a payload missing any required key, so a
+    mismatch between these two shapes silently publishes nothing at all."""
+    from backend.api.router import _load_benchmark_artifact  # noqa: F401
+
+    report = run(_perfect_run())
+    payload = benchmark.artifact_payload(report)
+    for key in ("accuracy", "precision", "recall", "false_positive_rate", "sample_size"):
+        assert payload.get(key) is not None, f"artifact is missing {key}"
+
+
+def test_the_artifact_round_trips_through_the_api_reader(tmp_path, monkeypatch):
+    """End-to-end on the publication path, with no live key: a real (mocked) run
+    writes an artifact, and the API reader publishes exactly those numbers."""
+    import json as _json
+
+    from backend.api import router as api_router
+
+    report = run(_perfect_run())
+    artifact = tmp_path / "benchmark_report.json"
+    artifact.write_text(_json.dumps(benchmark.artifact_payload(report)))
+    monkeypatch.setattr(api_router, "BENCHMARK_ARTIFACT_PATH", str(artifact))
+
+    published = api_router._load_benchmark_artifact()
+    assert published is not None
+    assert published["accuracy"] == report.accuracy
+    assert published["recall"] == report.recall
+    assert published["sample_size"] == report.total_snippets
+    assert published["generated_at"] is not None
+
+
+def test_the_artifact_records_how_degraded_the_run_was(monkeypatch):
+    """A future reader must be able to tell whether these rates came from a
+    clean run. Without errored_snippets in the artifact, an outage's numbers are
+    indistinguishable from real accuracy once written to disk."""
+    async def flaky(code, k_context=4):
+        item = next(i for i in benchmark.BENCHMARK_SET if i["code"] == code)
+        if item["id"] == "ssrf":
+            raise AgentExecutionError("scanner", "rate limited")
+        return _scan_with(item["expected_cwes"])
+
+    monkeypatch.setattr(benchmark, "run_scanner", flaky)
+    report = run(benchmark.run_benchmark(concurrency=1))
+    assert benchmark.artifact_payload(report)["errored_snippets"] == report.errored_snippets == 1
+
+
+def test_the_printed_report_surfaces_errored_scans(monkeypatch, capsys):
+    """The CLI omitted errored_snippets entirely, so a run during an outage
+    printed depressed recall with nothing on screen explaining why."""
+    async def always_fails(code, k_context=4):
+        raise AgentExecutionError("scanner", "upstream 503")
+
+    monkeypatch.setattr(benchmark, "run_scanner", always_fails)
+    report = run(benchmark.run_benchmark(concurrency=2))
+    benchmark.print_report(report)
+
+    out = capsys.readouterr().out
+    assert "ERRORED" in out
+    assert str(report.errored_snippets) in out
+
+
+async def _perfect_run():
+    """A full run where the scanner detects exactly the ground truth."""
+    import backend.core.benchmark as b
+
+    original = b.run_scanner
+
+    async def fake_scanner(code, k_context=4):
+        item = next(i for i in b.BENCHMARK_SET if i["code"] == code)
+        return _scan_with(item["expected_cwes"])
+
+    b.run_scanner = fake_scanner
+    try:
+        return await b.run_benchmark(concurrency=2)
+    finally:
+        b.run_scanner = original

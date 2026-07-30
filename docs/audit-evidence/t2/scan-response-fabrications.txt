@@ -1,0 +1,71 @@
+==========================================================================
+A. No benchmark artifact on disk (the real state of this repo today)
+==========================================================================
+artifact path: data/benchmark_report.json exists: False
+{
+  "severity_before": "critical",
+  "tokens_used": 2632,
+  "benchmark_report": null,
+  "audit_entry": {
+    "scan_id": "scan-1",
+    "code_hash": "9a9381a9afcb31acca16b72fae98651effd6fed4d2da33885131dd303238f376",
+    "prev_hash": null,
+    "entry_hash": null,
+    "chain_verified": null,
+    "chain_state": "pending"
+  }
+}
+
+-> benchmark_report null, chain pending, no CVSS keys, real token sum 2632
+
+==========================================================================
+B. With a real (mocked-run) benchmark artifact
+==========================================================================
+{
+  "accuracy": 0.7143,
+  "precision": 0.8333,
+  "recall": 0.7692,
+  "false_positive_rate": 0.125,
+  "sample_size": 14,
+  "generated_at": 1785390776.5818486
+}
+-> published verbatim from the artifact, with generated_at provenance
+
+==========================================================================
+C. A written audit entry produces the REAL chain link
+==========================================================================
+{
+  "scan_id": "scan-3",
+  "code_hash": "9a9381a9afcb31acca16b72fae98651effd6fed4d2da33885131dd303238f376",
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "entry_hash": "9e3899fab01379d8a0939190d28e1df89f92c125e68bf07cacab2d9948d0a41b",
+  "chain_verified": true,
+  "chain_state": "written"
+}
+-> entry_hash matches the record actually appended to the log
+
+==========================================================================
+D. A FAILED audit append is reported, not hidden
+==========================================================================
+{
+  "scan_id": "scan-4",
+  "code_hash": "9a9381a9afcb31acca16b72fae98651effd6fed4d2da33885131dd303238f376",
+  "prev_hash": null,
+  "entry_hash": null,
+  "chain_verified": false,
+  "chain_state": "failed"
+}
+-> chain_state 'failed': the UI says the scan is NOT in the chain
+
+==========================================================================
+E. The LLM cannot author DevGuard's own measurements
+==========================================================================
+FixResult schema fields shown to the model: ['addressed_cwe_ids', 'diff_summary', 'patched_code']
+required: ['patched_code', 'diff_summary']
+fixer returned a value for the measured field 'tokens_used'; discarding it (this field is set from the provider response, not the model)
+fixer returned a value for the measured field 'model_used'; discarding it (this field is set from the provider response, not the model)
+model-supplied payload: {'patched_code': 'x', 'diff_summary': 'aaaaaaaaaaaa', 'addressed_cwe_ids': [], 'model_used': 'gpt-4-omniscient', 'tokens_used': 999999}
+after stripping:       {'patched_code': 'x', 'diff_summary': 'aaaaaaaaaaaa', 'addressed_cwe_ids': []}
+-> a model claiming 999999 tokens on a different model cannot reach the report
+
+ALL ASSERTIONS PASSED

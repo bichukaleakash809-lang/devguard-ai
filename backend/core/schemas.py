@@ -131,6 +131,20 @@ class ScanResult(BaseModel):
         default_factory=list,
         description="CWE ids injected into context via RAG, for auditability.",
     )
+    tokens_used: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Total tokens (prompt + completion) the provider reported for this "
+            "agent's call. None means nothing counted them — a streaming call, "
+            "an SDK that omitted `usage`, or a monkeypatched client. None and 0 "
+            "are different facts and must stay distinguishable: 0 would render "
+            "as 'this call consumed no tokens', which is never true of a call "
+            "that happened (LAW 6). Set by the agent from the provider "
+            "response, never by the model's own JSON — see "
+            "ai_agent._strip_measured_fields."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +170,11 @@ class FixResult(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     model_used: str = Field(...)
+    tokens_used: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Provider-reported total tokens for this call. See ScanResult.tokens_used.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +201,11 @@ class ValidationResult(BaseModel):
     feedback: str = Field(
         default="",
         description="Actionable feedback for the Fixer on the next reflection iteration.",
+    )
+    tokens_used: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Provider-reported total tokens for this call. See ScanResult.tokens_used.",
     )
 
 

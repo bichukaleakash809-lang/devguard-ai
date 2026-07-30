@@ -24,6 +24,7 @@ ERROR HANDLING CONTRACT:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -48,6 +49,13 @@ from backend.core.schemas import ScanRequest, ScanResult
 
 logger = logging.getLogger("devguard.api")
 router = APIRouter()
+
+#: Where a real benchmark run leaves its numbers. Absent by default — the
+#: harness has to be run for accuracy figures to exist. Overridable so a
+#: deployment can point at a mounted artifact.
+BENCHMARK_ARTIFACT_PATH = os.environ.get(
+    "DEVGUARD_BENCHMARK_ARTIFACT", "data/benchmark_report.json"
+)
 
 # ---------------------------------------------------------------------------
 # SLO tracking (Feature #6).
@@ -120,12 +128,119 @@ async def _publish_span_event(scan_id: str, payload: dict[str, Any]) -> None:
         subs.discard(ws)
 
 
+def _load_benchmark_artifact() -> Optional[dict[str, Any]]:
+    """Read the accuracy figures the harness last measured, or None.
+
+    LAW 6: every published number comes from the machine. This response used to
+    carry `{"accuracy": 0.9, "precision": 0.92, "recall": 0.88,
+    "false_positive_rate": 0.05, "sample_size": 14}` as hand-typed literals,
+    and the result page rendered them as an "Accuracy benchmark proof strip" on
+    every scan — while the README correctly stated the harness "has never been
+    run to an artifact, so no accuracy figures are published anywhere."
+
+    Now the only source is an artifact written by an actual run
+    (`python -m backend.core.benchmark --json > data/benchmark_report.json`).
+    No artifact means no figures: the field is `null` and the UI says so. A
+    corrupt or partial artifact is also `null` — never a half-populated strip,
+    because a missing `recall` rendering as 0% reads as a measured 0% recall.
+    """
+    required = ("accuracy", "precision", "recall", "false_positive_rate", "sample_size")
+    try:
+        with open(BENCHMARK_ARTIFACT_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Benchmark artifact at %s is unreadable (%s); publishing no accuracy "
+            "figures rather than substituting any.", BENCHMARK_ARTIFACT_PATH, exc,
+        )
+        return None
+
+    if not isinstance(data, dict) or any(data.get(k) is None for k in required):
+        logger.warning(
+            "Benchmark artifact at %s is missing required metrics %s; publishing "
+            "no accuracy figures.", BENCHMARK_ARTIFACT_PATH,
+            [k for k in required if not isinstance(data, dict) or data.get(k) is None],
+        )
+        return None
+
+    out = {k: data[k] for k in required}
+    # Provenance, so the UI can date the figures instead of implying they are
+    # from this scan. Optional: an older artifact simply has no timestamp.
+    if data.get("generated_at") is not None:
+        out["generated_at"] = data["generated_at"]
+    return out
+
+
+#: Sentinel `finalized_entry` value meaning "the append was attempted and it
+#: raised", as distinct from None ("not attempted yet").
+AUDIT_APPEND_FAILED = "append-failed"
+
+
+def _audit_entry_block(
+    scan_id: str, code_hash: str, finalized_entry: Optional[Any],
+) -> dict[str, Any]:
+    """The audit-chain facts for one scan, reporting only what is true yet."""
+    if finalized_entry is AUDIT_APPEND_FAILED:
+        return {
+            "scan_id": scan_id,
+            "code_hash": code_hash,
+            "prev_hash": None,
+            "entry_hash": None,
+            "chain_verified": False,
+            "chain_state": "failed",
+        }
+    if isinstance(finalized_entry, dict):
+        return {
+            "scan_id": scan_id,
+            "code_hash": code_hash,
+            "prev_hash": finalized_entry.get("prev_hash"),
+            "entry_hash": finalized_entry.get("entry_hash"),
+            # The append itself computed and wrote these links, so the record IS
+            # chained. This is not a claim about the whole file — that is what
+            # GET /audit-log/verify is for, and it walks every entry.
+            "chain_verified": True,
+            "chain_state": "written",
+        }
+    return {
+        "scan_id": scan_id,
+        "code_hash": code_hash,
+        "prev_hash": None,
+        "entry_hash": None,
+        "chain_verified": None,
+        "chain_state": "pending",
+    }
+
+
+def _sum_tokens(*results) -> Optional[int]:
+    """Total provider-reported tokens across the agents that reported any.
+
+    Returns None when no agent reported usage at all — that is "nothing counted
+    them", which is a different fact from "zero tokens were used" and must not
+    render as a measured 0 on the "Tokens Used" card.
+    """
+    counted = [
+        t for t in (getattr(r, "tokens_used", None) for r in results if r is not None)
+        if t is not None
+    ]
+    return sum(counted) if counted else None
+
+
 def _build_frontend_result(
     scan_id: str, req: ScanRequest, pipeline, trace_id: str,
     latency_ms: float, cost: float, status: str = "complete",
+    finalized_entry: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Reshape the internal PipelineResult into the exact JSON contract the
-    Result Dashboard (frontend/app/result/page.tsx) expects."""
+    Result Dashboard (frontend/app/result/page.tsx) expects.
+
+    Everything this function emits is rendered to a human as measured fact, so
+    every field is either a real measurement or explicitly absent (`null`).
+    `finalized_entry` is the audit record `_finalize` actually wrote, when it has
+    been written by the time this runs; without it the chain state is reported as
+    `pending` rather than asserted as verified.
+    """
     scan = getattr(pipeline, "scan", None)
     final_fix = getattr(pipeline, "final_fix", None)
     final_validation = getattr(pipeline, "final_validation", None)
@@ -159,9 +274,17 @@ def _build_frontend_result(
         })
 
     eval_score = getattr(final_validation, "eval_score", 0) if final_validation else 0
-    cvss_map = {"low": 3.0, "medium": 5.5, "high": 7.8, "critical": 9.5}
-    cvss_before = cvss_map.get(max_sev, 0.0) if vulnerabilities else 0.0
-    cvss_after = 1.2 if vulnerabilities else 0.0
+
+    # SEVERITY, NOT CVSS. This used to publish `cvss_before` from a hard-coded
+    # {"critical": 9.5, "high": 7.8, ...} lookup and `cvss_after` as the constant
+    # 1.2, both rendered with `.toFixed(1)` under a "CVSS" label — which claims a
+    # scored CVSS vector for code nobody scored. The Scanner reports a severity
+    # *band*, so that ordinal is what gets published, under its own name.
+    #
+    # There is deliberately no "after" value: nothing re-scores the patched code.
+    # The Validator grades the patch (eval_score, already reported above), which
+    # is a different measurement from the residual severity of the result.
+    severity_before = max_sev if vulnerabilities else None
 
     slo_snap = _slo_snapshot()
     budget = slo_snap["error_budget_remaining"]
@@ -175,34 +298,40 @@ def _build_frontend_result(
         "language": getattr(req, "language", "python"),
         "vulnerabilities": vulnerabilities,
         "eval_score": eval_score,
-        "cvss_before": cvss_before,
-        "cvss_after": cvss_after,
+        "severity_before": severity_before,
         "retry_history": retry_history,
         "model_routing": {
             "tier": routing.get("scanner", "unknown"),
             "reason": f"severity-based routing ({max_sev})",
         },
         "latency_ms": round(latency_ms, 1),
-        "tokens_used": 0,
+        # Real provider-reported usage, summed over the agents that ran. `null`
+        # when nothing counted them (streaming call, SDK without a `usage` block)
+        # — this was previously the literal 0 on every response while the UI
+        # rendered it as a "Tokens Used" metric.
+        "tokens_used": _sum_tokens(scan, final_fix, final_validation),
         "cost_usd": cost,
         "slo_status": {
             "slo_target": SLO_TARGET_PCT,
             "error_budget_remaining_pct": budget,
             "state": slo_state,
         },
-        "audit_entry": {
-            "scan_id": scan_id,
-            "code_hash": code_hash,
-            "prev_hash": "",
-            "chain_verified": True,
-        },
-        "benchmark_report": {
-            "accuracy": 0.9,
-            "precision": 0.92,
-            "recall": 0.88,
-            "false_positive_rate": 0.05,
-            "sample_size": 14,
-        },
+        # THE CHAIN BADGE. This block used to be
+        # `{"prev_hash": "", "chain_verified": True}` — a hard-coded True that
+        # rendered a green "✅ Chain Verified" tamper-evidence badge on the result
+        # page. It was also computed BEFORE the entry existed: `_finalize` appends
+        # the record after this function returns, so the response asserted a
+        # verified hash chain for a record that had not been written.
+        #
+        # Three states now, and they are distinguishable:
+        #   pending  -> not written yet, `chain_verified: null` (the UI says
+        #               "pending", not "broken" — reporting False here would cry
+        #               tamper on every healthy scan)
+        #   written  -> the real prev_hash/entry_hash the append produced
+        #   failed   -> the append raised; the entry is NOT in the log
+        "audit_entry": _audit_entry_block(scan_id, code_hash, finalized_entry),
+        # Accuracy figures come from a real harness run or not at all.
+        "benchmark_report": _load_benchmark_artifact(),
         "trace_id": trace_id,
         "spans": [],
         "status": status,
@@ -243,7 +372,7 @@ async def scan(request: Request, x_traceparent: Optional[str] = Header(default=N
                 latency = time.perf_counter() - started
                 _record_slo_sample(latency)
                 _emit_request_metrics(cached, latency, cache_hit=True)
-                return _finalize_or_gate(scan_id, scan_req, cached, trace_id, latency, cached_hit=True)
+                return await _finalize_or_gate(scan_id, scan_req, cached, trace_id, latency, cached_hit=True)
 
             # ---- Run the resilient pipeline (breaker + fallback) ----
             result = await run_pipeline_resilient(scan_req)
@@ -267,7 +396,7 @@ async def scan(request: Request, x_traceparent: Optional[str] = Header(default=N
             _record_slo_sample(latency)
             _emit_request_metrics(result, latency, cache_hit=False)
 
-            return _finalize_or_gate(scan_id, scan_req, result, trace_id, latency, cached_hit=False, cost=cost)
+            return await _finalize_or_gate(scan_id, scan_req, result, trace_id, latency, cached_hit=False, cost=cost)
 
         except CircuitOpenError as exc:
             latency = time.perf_counter() - started
@@ -302,25 +431,52 @@ async def scan(request: Request, x_traceparent: Optional[str] = Header(default=N
             )
 
 
-def _finalize_or_gate(
+async def _finalize_or_gate(
     scan_id: str, req: ScanRequest, result: ScanResult, trace_id: str,
     latency_s: float = 0.0, cached_hit: bool = False, cost: float = 0.0,
 ) -> dict[str, Any]:
     """
     Human-in-the-loop gate (Feature #7): critical/high severity fixes PAUSE for
     approval instead of auto-finalizing. Everything else finalizes immediately.
+
+    The audit append for the low/medium path is AWAITED here, not fired as a
+    background task. It used to be `asyncio.create_task(_finalize(...))`, which
+    had three problems: the docstring claimed the write was synchronous when it
+    was not; an append that raised was swallowed with no log and no signal, so
+    the audit record was silently lost while the response had already told the
+    client the chain was verified; and asyncio keeps only a weak reference to a
+    bare task, so it could be garbage-collected before it ran. The append is a
+    sub-millisecond off-thread file write (see audit.append_entry), so awaiting
+    it costs the request nothing measurable and makes the reported chain state
+    true.
     """
     severity = str(getattr(req, "severity", "")).lower()
     verdict = str(getattr(result, "verdict", "unknown"))
     score = _extract_score(result)
+    gated = severity in ("critical", "high")
+
+    # Critical/high pause at the gate, so no entry is written yet -> the chain
+    # state is reported as "pending" until /approve or /reject writes one.
+    finalized_entry: Optional[Any] = None
+    if not gated:
+        try:
+            finalized_entry = await _finalize(scan_id, req, result)
+        except Exception:  # noqa: BLE001 — the audit write must not 500 the scan
+            logger.exception(
+                "Audit append FAILED for scan_id=%s; the scan result stands but "
+                "this scan is NOT in the audit chain.", scan_id,
+            )
+            telemetry.add_span_event("audit.append_failed", {"scan.id": scan_id})
+            finalized_entry = AUDIT_APPEND_FAILED
 
     frontend_result = _build_frontend_result(
         scan_id, req, result, trace_id, latency_s * 1000, cost,
-        status="pending_approval" if severity in ("critical", "high") else "complete",
+        status="pending_approval" if gated else "complete",
+        finalized_entry=finalized_entry,
     )
     _scan_results[scan_id] = frontend_result
 
-    if severity in ("critical", "high"):
+    if gated:
         _pending_approvals[scan_id] = {
             "request": req,
             "result": result,
@@ -350,8 +506,7 @@ def _finalize_or_gate(
             "message": "High-severity fix requires human approval before finalization.",
         }
 
-    # Low/medium -> finalize now (write audit entry synchronously in the request).
-    asyncio.create_task(_finalize(scan_id, req, result))
+    # Low/medium: the audit entry was already written above, awaited.
     # Tell any (current or future, thanks to the buffer) WebSocket subscriber
     # that this scan is done — this is the event the frontend actually waits on.
     asyncio.create_task(
@@ -369,10 +524,15 @@ def _finalize_or_gate(
     }
 
 
-async def _finalize(scan_id: str, req: ScanRequest, result: ScanResult) -> None:
-    """Write the immutable audit entry (Feature #8)."""
+async def _finalize(scan_id: str, req: ScanRequest, result: ScanResult) -> dict[str, Any]:
+    """Write the immutable audit entry (Feature #8) and return the record written.
+
+    Returning it lets the caller report the real prev_hash/entry_hash instead of
+    asserting a chain link it never saw. Raises on failure — callers decide what
+    to do, but nobody may report a verified chain for a write that did not happen.
+    """
     code_hash = telemetry._sha256(getattr(req, "code", ""))
-    await audit.append_entry(
+    return await audit.append_entry(
         scan_id=scan_id, code_hash=code_hash, verdict=str(getattr(result, "verdict", "unknown"))
     )
 
@@ -402,10 +562,17 @@ async def approve(scan_id: str):
         span.set_attribute("scan.id", scan_id)
         span.set_attribute("approval.decision", "approved")
         telemetry.add_span_event("approval.approved", {"scan.id": scan_id})
-        await _finalize(scan_id, entry["request"], entry["result"])
+        written = await _finalize(scan_id, entry["request"], entry["result"])
     score = _extract_score(entry["result"])
     if scan_id in _scan_results:
-        _scan_results[scan_id]["status"] = "complete"
+        stored = _scan_results[scan_id]
+        stored["status"] = "complete"
+        # The gated result was stored with chain_state "pending" because no entry
+        # existed yet. It does now, so replace the placeholder with the real
+        # links rather than leaving the dashboard showing a stale pending badge.
+        stored["audit_entry"] = _audit_entry_block(
+            scan_id, stored["audit_entry"]["code_hash"], written
+        )
     await _publish_span_event(
         scan_id, {"type": "done", "scan_id": scan_id, "score": score}
     )
@@ -424,9 +591,14 @@ async def reject(scan_id: str, reason: Optional[str] = None):
         span.set_attribute("approval.reason", reason or "unspecified")
         telemetry.add_span_event("approval.rejected", {"scan.id": scan_id, "reason": reason or ""})
         code_hash = telemetry._sha256(getattr(entry["request"], "code", ""))
-        await audit.append_entry(scan_id=scan_id, code_hash=code_hash, verdict="rejected")
+        written = await audit.append_entry(
+            scan_id=scan_id, code_hash=code_hash, verdict="rejected"
+        )
     if scan_id in _scan_results:
-        _scan_results[scan_id]["status"] = "error"
+        stored = _scan_results[scan_id]
+        stored["status"] = "error"
+        # A rejection is also an audited decision — the entry exists, so report it.
+        stored["audit_entry"] = _audit_entry_block(scan_id, code_hash, written)
     await _publish_span_event(
         scan_id, {"type": "error", "message": f"Fix rejected: {reason or 'no reason given'}"}
     )

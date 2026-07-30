@@ -165,6 +165,77 @@ def _extract_usage(resp) -> tuple[int, int]:
         return 0, 0
 
 
+def _total_tokens(resp) -> Optional[int]:
+    """Provider-reported total tokens for one call, or None if unknown.
+
+    `_extract_usage` collapses "the provider said zero" and "there was no usage
+    block" into (0, 0), which is the right call for metric counters — adding
+    zero is harmless. It is the wrong call for a value rendered to a human as
+    "Tokens Used": 0 reads as a measurement ("this scan consumed no tokens"),
+    which is false for any call that actually happened. So None is preserved
+    here and carried all the way to the API response, where it becomes `null`
+    and the UI shows "n/a" (LAW 6 — a published number comes from the machine,
+    and an absent measurement is absent, not zero).
+    """
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return None
+        prompt = getattr(usage, "prompt_tokens", None)
+        completion = getattr(usage, "completion_tokens", None)
+        if prompt is None and completion is None:
+            return None
+        return int(prompt or 0) + int(completion or 0)
+    except Exception:  # noqa: BLE001 — token accounting must never break a scan
+        return None
+
+
+# Fields on an agent's Pydantic result that are MEASURED by DevGuard, not
+# authored by the model. The Fixer and Validator are constructed with
+# `Model(**data)` where `data` is parsed straight out of LLM JSON, so anything
+# the schema accepts, the model can set. `tokens_used` is displayed as a usage
+# metric and `model_used` is the auditable routing record, so a model that
+# emitted either would be writing DevGuard's own telemetry. Both are stripped
+# from the parsed payload and re-set from the provider response.
+_MEASURED_FIELDS = ("tokens_used", "model_used")
+
+
+def _strip_measured_fields(agent: str, data: dict) -> dict:
+    """Remove model-authored values for fields DevGuard measures itself."""
+    for field in _MEASURED_FIELDS:
+        if field in data:
+            logger.warning(
+                "%s returned a value for the measured field %r; discarding it "
+                "(this field is set from the provider response, not the model)",
+                agent, field,
+            )
+            data.pop(field)
+    return data
+
+
+def _model_facing_schema(model_cls) -> dict:
+    """The agent's output schema with DevGuard-measured fields removed.
+
+    The full `model_json_schema()` lists `model_used` and `tokens_used` — and
+    `model_used` is *required* — so handing it to the LLM verbatim instructs the
+    model to invent a routing record and a token count. It complies, which is
+    why `_strip_measured_fields` would otherwise fire on every single call and
+    say nothing.
+
+    Removing them here means the model is never asked for a measurement it
+    cannot make, and a stripped field becomes a real anomaly worth a warning.
+    """
+    schema = model_cls.model_json_schema()
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        for field in _MEASURED_FIELDS:
+            props.pop(field, None)
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = [r for r in required if r not in _MEASURED_FIELDS]
+    return schema
+
+
 # ---------------------------------------------------------------------------
 # Model routing (feature #4)
 # ---------------------------------------------------------------------------
@@ -480,7 +551,7 @@ async def run_scanner(code: str, k_context: int = 4) -> ScanResult:
         model=model,
         system_prompt=SCANNER_SYSTEM,
         user_prompt=user_prompt,
-        json_schema=ScanResult.model_json_schema(),
+        json_schema=_model_facing_schema(ScanResult),
     )
     content = resp.choices[0].message.content
     data = _parse_json_content("scanner", content)
@@ -494,6 +565,7 @@ async def run_scanner(code: str, k_context: int = 4) -> ScanResult:
         vulnerabilities=vulns,
         model_used=model,
         retrieved_cwe_ids=[e["cwe_id"] for e in retrieved],
+        tokens_used=_total_tokens(resp),
     )
 
 
@@ -568,11 +640,12 @@ async def run_fixer(
         model=model,
         system_prompt=FIXER_SYSTEM,
         user_prompt=user_prompt,
-        json_schema=FixResult.model_json_schema(),
+        json_schema=_model_facing_schema(FixResult),
     )
     content = resp.choices[0].message.content
-    data = _parse_json_content("fixer", content)
+    data = _strip_measured_fields("fixer", _parse_json_content("fixer", content))
     data["model_used"] = model
+    data["tokens_used"] = _total_tokens(resp)
 
     # GOD-TIER: adaptive-routing cost-saved credit. Best-effort, never fatal.
     if override_model is not None and override_model != base_model:
@@ -685,10 +758,11 @@ async def run_validator(
         model=MODEL_VALIDATOR,
         system_prompt=VALIDATOR_SYSTEM,
         user_prompt=user_prompt,
-        json_schema=ValidationResult.model_json_schema(),
+        json_schema=_model_facing_schema(ValidationResult),
     )
     content = resp.choices[0].message.content
-    data = _parse_json_content("validator", content)
+    data = _strip_measured_fields("validator", _parse_json_content("validator", content))
+    data["tokens_used"] = _total_tokens(resp)
     try:
         return ValidationResult(**data)
     except Exception as exc:  # noqa: BLE001

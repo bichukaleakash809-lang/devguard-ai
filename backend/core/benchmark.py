@@ -6,6 +6,14 @@ DESIGN PHILOSOPHY (for the review):
 "We built a smart scanner" is a claim. "Our scanner hits 0.9 precision /
 0.85 recall on 14 labeled OWASP snippets" is a demo. Judges reward the second.
 
+⚠ THE FIGURES IN THAT SENTENCE ARE AN ILLUSTRATION OF THE FORMAT, NOT A RESULT.
+This harness needs a live LLM key, and it has never been run against one, so
+DevGuard publishes no accuracy figures anywhere. Numbers reach the API and UI
+through exactly one route: `--json <path>` writes an artifact, and
+`backend/api/router.py:_load_benchmark_artifact` reads it. No artifact, no
+figures — the field is `null` and the UI says "not measured". Do not
+short-circuit that by typing plausible values into either end (LAW 6).
+
 This harness runs the Scanner against a hardcoded, labeled corpus and computes
 precision, recall, accuracy, and — critically for a security tool — false
 positive rate. We match on CWE id (order-independent set comparison per
@@ -24,8 +32,13 @@ honest than "did it find *anything*".
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import logging
+import pathlib
+import sys
+import time
 
 from backend.core.ai_agent import run_scanner
 from backend.core.schemas import AgentExecutionError, BenchmarkReport
@@ -222,6 +235,17 @@ def print_report(report: BenchmarkReport) -> None:
     print("DEVGUARD AI — SCANNER BENCHMARK")
     print("=" * 60)
     print(f"Snippets:            {report.total_snippets}")
+    # Printed before the metrics, not buried after them: every errored snippet
+    # contributes zero detections, so a run with errors reports depressed recall
+    # for an infrastructure reason. Reading the rates without this line first is
+    # how an outage gets published as poor accuracy.
+    if report.errored_snippets:
+        print(
+            f"ERRORED:             {report.errored_snippets}  "
+            "<-- these scans FAILED; every rate below understates true quality"
+        )
+    else:
+        print(f"Errored:             0")
     print(f"True Positives:      {report.true_positives}")
     print(f"False Positives:     {report.false_positives}")
     print(f"False Negatives:     {report.false_negatives}")
@@ -237,7 +261,82 @@ def print_report(report: BenchmarkReport) -> None:
         print(f"[{status}] {s['id']:24} expected={s['expected']} found={s['found']}")
 
 
-if __name__ == "__main__":
-    # Standalone demo entrypoint: `python -m backend.core.benchmark`
-    report = asyncio.run(run_benchmark())
+def artifact_payload(report: BenchmarkReport) -> dict:
+    """The exact JSON `backend/api/router.py:_load_benchmark_artifact` reads.
+
+    This is the ONLY sanctioned route from a benchmark run to a published
+    number. It carries `generated_at` so the UI can date the figures, and
+    `errored_snippets` so a degraded run is auditable after the fact rather than
+    silently republished as the scanner's accuracy.
+    """
+    return {
+        "accuracy": report.accuracy,
+        "precision": report.precision,
+        "recall": report.recall,
+        "false_positive_rate": report.false_positive_rate,
+        "sample_size": report.total_snippets,
+        "errored_snippets": report.errored_snippets,
+        "mean_confidence_on_hits": report.mean_confidence_on_hits,
+        "generated_at": time.time(),
+    }
+
+
+def _main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m backend.core.benchmark",
+        description=(
+            "Run the Scanner against the labeled corpus and report accuracy. "
+            "Requires a working GROQ_API_KEY — every snippet is a real LLM call."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        metavar="PATH",
+        help=(
+            "Write the measured figures to PATH so the API can publish them "
+            "(default read location: data/benchmark_report.json). Without this, "
+            "the run only prints — nothing is published."
+        ),
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=4,
+        help="Parallel scans (default 4). Lower it if the provider rate-limits.",
+    )
+    parser.add_argument(
+        "--allow-errored", action="store_true",
+        help=(
+            "Write the artifact even when some scans failed. Off by default: an "
+            "errored run's rates understate quality, and publishing them as the "
+            "scanner's accuracy would be a wrong number with full authority."
+        ),
+    )
+    args = parser.parse_args()
+
+    report = asyncio.run(run_benchmark(concurrency=args.concurrency))
     print_report(report)
+
+    if not args.json:
+        return 0
+
+    if report.errored_snippets and not args.allow_errored:
+        print(
+            f"\nREFUSING to write {args.json}: {report.errored_snippets} of "
+            f"{report.total_snippets} scans errored, so these rates measure an "
+            "outage, not the scanner. Fix the cause and re-run, or pass "
+            "--allow-errored to publish them anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
+    path = pathlib.Path(args.json)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(artifact_payload(report), indent=2) + "\n")
+    print(f"\nWrote {path} — the API will now publish these figures.")
+    return 0
+
+
+if __name__ == "__main__":
+    # Standalone entrypoint:
+    #   python -m backend.core.benchmark
+    #   python -m backend.core.benchmark --json data/benchmark_report.json
+    sys.exit(_main())
