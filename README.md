@@ -53,7 +53,7 @@ flowchart TD
 
 | Loop | Telemetry In | Decision Out |
 |---|---|---|
-| **Telemetry-Aware Router** | Recent 30-min LLM spend | Downgrades model tier under cost pressure — **never for `critical` severity**, a hard-coded safety floor |
+| **Telemetry-Aware Router** | Recent 30-min LLM spend | Downgrades model tier under cost pressure — **never for `critical` severity**, a hard-coded safety floor. Enforced by parsing through the `Severity` enum and failing safe on anything it cannot parse; 31 tests in `tests/test_adaptive_routing_floor.py`, including that non-critical severities *are* still downgradable so the floor cannot be "fixed" by disabling cost control |
 | **Pattern-Learning Agent** | Historical Validator fail-rate per CWE | Elevates RAG retrieval depth (`k`) for CWE classes with a track record of needing more context |
 | **Cost Guardian** | Cumulative session spend | Flips a global conservation-mode flag respected by the router |
 | **Postmortem Agent** | The error burst that just tripped the circuit breaker | Writes a 2-3 sentence plain-English root cause the moment the breaker opens |
@@ -156,7 +156,7 @@ Stated plainly, because a claim a judge can disprove costs more than the feature
   That artifact is the **only** route by which a number reaches the API or the
   UI — nothing is hard-coded at either end, and the harness refuses to write it
   if any scan errored (pass `--allow-errored` to override).
-- **Test coverage is real but partial.** 150 tests run in CI on every push, with
+- **Test coverage is real but partial.** 181 tests run in CI on every push, with
   no API key, no collector and no network: schema contracts, audit chain
   tamper-detection, the paginated audit read, circuit breaker, telemetry
   fail-safety, the prompt-injection boundary, RAG determinism, the benchmark

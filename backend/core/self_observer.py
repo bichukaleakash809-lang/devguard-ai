@@ -35,12 +35,16 @@ import logging
 from typing import Optional
 
 from backend.core.mcp_client import get_mcp_client
+from backend.core.schemas import Severity
 
 logger = logging.getLogger(__name__)
 
 # ── Shared tier vocabulary ───────────────────────────────────────────────────
 CHEAP_MODEL_TIER = "llama-3.1-8b-instant"
-SEVERITY_CRITICAL = "critical"
+#: Kept for callers that import it. The floor itself now parses through the
+#: `Severity` enum rather than comparing against this string — see
+#: `_is_downgradable` for why a bare comparison was unsafe.
+SEVERITY_CRITICAL = Severity.CRITICAL.value
 
 
 # ── 1. TelemetryAwareRouter ──────────────────────────────────────────────────
@@ -50,16 +54,77 @@ COST_BUDGET_USD_PER_30MIN: float = float(
 )
 
 
+def _is_downgradable(severity) -> bool:
+    """True only when we are certain this severity may lose its model tier.
+
+    THE SAFETY FLOOR. This decides whether cost pressure is allowed to move a
+    scan to a cheaper model, and it is the property the README and the demo
+    script advertise most loudly: "cost pressure can NEVER downgrade a critical
+    fix."
+
+    It used to be the bare comparison `severity == SEVERITY_CRITICAL`, which
+    failed OPEN on any format variance — `"CRITICAL"`, `" critical"` and
+    `"Severity.CRITICAL"` all missed the branch and fell through to the
+    downgrade logic. That last form is not hypothetical: `str()` of this
+    `str`-subclassing enum produces exactly it, and `backend/api/router.py`
+    normalises severity with `.replace("Severity.", "").lower()` precisely
+    because those strings circulate here.
+
+    `select_model` in ai_agent.py already stated the principle in its own
+    docstring — coerce through the enum so an unknown value "fails loudly rather
+    than silently defaulting to the cheap model", because "silently
+    under-provisioning a critical scan is the exact failure mode we must never
+    have." This function applies the same rule at the one place that can
+    actually cause that outcome.
+
+    Two rules, both failing in the safe direction:
+      * A value that parses as CRITICAL is never downgradable.
+      * A value that does not parse at all is never downgradable either, and
+        says so in the log. An input this layer cannot interpret must not cost a
+        scan its model tier — a new severity name or an upstream typo would
+        otherwise silently route critical work to the 8B model.
+    """
+    if isinstance(severity, Severity):
+        return severity is not Severity.CRITICAL
+
+    if not isinstance(severity, str):
+        logger.warning(
+            "adaptive_select_model: severity %r is a %s, not a Severity or str; "
+            "refusing to downgrade the model tier for an input this layer cannot "
+            "interpret.", severity, type(severity).__name__,
+        )
+        return False
+
+    # Accept the canonical value, any casing, surrounding whitespace, and the
+    # "Severity.CRITICAL" form that str() of the enum produces.
+    token = severity.strip()
+    if token.lower().startswith("severity."):
+        token = token.split(".", 1)[1]
+
+    try:
+        parsed = Severity(token.lower())
+    except ValueError:
+        logger.warning(
+            "adaptive_select_model: severity %r does not parse as a Severity; "
+            "refusing to downgrade the model tier. This is an integration bug "
+            "upstream — the scan proceeds on the severity-based model.", severity,
+        )
+        return False
+
+    return parsed is not Severity.CRITICAL
+
+
 async def adaptive_select_model(
     severity: str, base_model: str
 ) -> tuple[str, Optional[str]]:
     """Telemetry in: recent 30-minute spend trend from SigNoz.
     Decision out: the model tier to actually use for this scan.
 
-    Safety floor: `critical` severity is NEVER downgraded, regardless of
-    cost pressure or conservation mode.
+    Safety floor: `critical` severity is NEVER downgraded, regardless of cost
+    pressure or conservation mode — and neither is a severity this layer cannot
+    parse. See `_is_downgradable`.
     """
-    if severity == SEVERITY_CRITICAL:
+    if not _is_downgradable(severity):
         return base_model, None
 
     if is_conservation_mode():

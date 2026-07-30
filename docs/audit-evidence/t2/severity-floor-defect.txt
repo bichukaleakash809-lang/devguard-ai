@@ -1,0 +1,33 @@
+Conservation mode ON. base_model = llama-3.3-70b-versatile
+A downgrade sends a scan to llama-3.1-8b-instant instead.
+
+severity passed in       OLD floor    NEW floor    outcome
+------------------------------------------------------------------------
+'critical'               held         held         HELD
+'CRITICAL'               FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'Critical'               FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+' critical '             FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'Severity.CRITICAL'      FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'Severity.critical'      FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'Severity.CRITICAL'      held         held         HELD
+''                       FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'urgent'                 FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'sev1'                   FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'p0'                     FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'None'                   FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+'3'                      FAILED OPEN  held         HELD  <-- WAS DOWNGRADED
+
+Non-critical severities must STILL be downgradable (the floor is not a wall):
+------------------------------------------------------------------------
+'low'                    -> llama-3.1-8b-instant  reason=conservation_mode_active
+'medium'                 -> llama-3.1-8b-instant  reason=conservation_mode_active
+'high'                   -> llama-3.1-8b-instant  reason=conservation_mode_active
+'HIGH'                   -> llama-3.1-8b-instant  reason=conservation_mode_active
+'Severity.HIGH'          -> llama-3.1-8b-instant  reason=conservation_mode_active
+
+Enum round trip through the pipeline's own expression:
+  the enum                               'Severity.CRITICAL'    -> HELD
+  .value (what run_pipeline sends)       'critical'             -> HELD
+  str() of the enum                      'Severity.CRITICAL'    -> HELD
+
+ALL ASSERTIONS PASSED

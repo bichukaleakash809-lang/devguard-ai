@@ -28,8 +28,8 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness and the `/scan` response contract all had proven defects, all fixed with failing-test-first (`0a7341d`, `7678d26`, `296f37d`). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
-| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
-| 6 | Test coverage | 58 → 150, contract and regression tests throughout. |
+| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
+| 6 | Test coverage | 58 → 181, contract and regression tests throughout. |
 
 ---
 
@@ -218,8 +218,8 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 150 passing**, all with no API key, no collector, no network.
-(Per-file counts below were last de-drifted at commit `90dd6fb`; re-derive with
+**Test inventory — 181 passing**, all with no API key, no collector, no network.
+(Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
   bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
@@ -245,6 +245,9 @@ false-negative risk is real and stated.
   artifact's round trip through the API reader
 - `test_scan_response_contract.py` (18) — every published value on the Result
   Dashboard is a measurement or explicitly absent; see the section below
+- `test_adaptive_routing_floor.py` (31) — the critical-severity safety floor
+  holds for every spelling of "critical" and fails safe on anything it cannot
+  parse, while non-critical severities stay downgradable
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -362,6 +365,53 @@ exits **0** and leaves the directory empty — a clean clone succeeds. Only
 `git submodule update --init` and `git submodule status` fail (exit 128).
 Severity downgraded **Critical → Low**.
 
+### The critical-severity safety floor failed open
+
+The most-advertised safety property in the project, and it did not hold. README:
+*"never for `critical` severity, a hard-coded safety floor."* DEMO_SCRIPT.md, to
+camera: *"Cost pressure can NEVER downgrade a critical fix."*
+
+The floor was a bare string comparison:
+
+```python
+if severity == SEVERITY_CRITICAL:      # "critical"
+    return base_model, None
+```
+
+Proven by 17 failing tests before the fix. Under cost pressure it **failed open**
+on every one of these, sending a critical scan to `llama-3.1-8b-instant` instead
+of the 70B model:
+
+```
+'critical'            held
+'CRITICAL'            FAILED OPEN -> downgraded
+'Critical'            FAILED OPEN -> downgraded
+' critical '          FAILED OPEN -> downgraded
+'Severity.CRITICAL'   FAILED OPEN -> downgraded
+''  'urgent'  'sev1'  'p0'  None  3   all FAILED OPEN -> downgraded
+```
+
+`'Severity.CRITICAL'` is not hypothetical: `Severity` subclasses `str`, so
+`str(Severity.CRITICAL)` produces exactly that, and `backend/api/router.py`
+normalises severity with `.replace("Severity.", "").lower()` — the form
+circulates here already.
+
+`select_model` in `ai_agent.py` had stated the correct principle in its own
+docstring all along — coerce through the enum so an unknown value "fails loudly
+rather than silently defaulting to the cheap model", because "silently
+under-provisioning a critical scan is the exact failure mode we must never have".
+The one function that could actually cause that outcome did not follow it.
+
+`_is_downgradable` now parses through `Severity` (accepting any casing,
+surrounding whitespace, and the `Severity.X` form) and **fails safe on anything
+it cannot parse**, with a warning — an unrecognised severity must never cost a
+scan its model tier. 31 tests, including the inverse property: `low`/`medium`/
+`high` must *still* be downgradable, so the floor cannot be "fixed" by quietly
+disabling cost control.
+
+Evidence: `docs/audit-evidence/t2/severity-floor-defect.txt` (old vs new floor,
+side by side, per input form). **Tests 150 → 181.**
+
 ### Frontend dependency advisories — found, triaged, NOT actioned
 
 18 advisories (16 high, 2 moderate) in `next` and its nested `postcss`. `next`
@@ -459,7 +509,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 150 passed
+pytest tests/                                -> 181 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -482,7 +532,7 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `otel-collector-config-validation.txt`, `rag-dependency-finding.txt`,
 `pipeline-defects.txt`, `benchmark-defect.txt`, `audit-performance.txt`,
 `audit-endpoint-performance.txt`, `scan-response-fabrications.txt`,
-`frontend-dependency-advisories.txt`.
+`frontend-dependency-advisories.txt`, `severity-floor-defect.txt`.
 
 ---
 
@@ -493,7 +543,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 150 passed
+python -m pytest tests/          # expect 181 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -572,4 +622,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `90dd6fb` + this update.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `e29eb28` + this update. CI green on runs 21, 22, 23.*
