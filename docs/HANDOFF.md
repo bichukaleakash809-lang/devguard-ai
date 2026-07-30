@@ -29,7 +29,7 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed** (failed open on casing variance), **the human-in-the-loop approval gate fixed** (never opened at all), **the audit trail now records a real verdict** (35/35 entries said `unknown`). Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 296, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 301, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 296 passing**, all with no API key, no collector, no network.
+**Test inventory — 301 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -253,9 +253,10 @@ false-negative risk is real and stated.
   requested
 - `test_scan_state_retention.py` (14) — the three in-memory dicts are bounded by
   count and age, and eviction never drops a live result or a pending approval
-- `test_endpoint_event_loop.py` (5) — measures loop starvation directly, so a
+- `test_endpoint_event_loop.py` (6) — measures loop starvation directly, so a
   handler that reintroduces synchronous file I/O fails rather than just getting
-  slower
+  slower; includes a self-validation test requiring the harness to catch a
+  known-blocking call
 - `test_cache_round_trip.py` (16) — the cache reads back what it writes, a
   wrong-shaped entry stays a miss, and hit/miss counters match reality
 - `test_cost_accounting.py` (13) — per-request cost is summed from real agent
@@ -533,6 +534,37 @@ away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
 
+### A flaky test of my own, de-flaked properly
+
+`test_verify_endpoint_does_not_block_the_event_loop` failed **1 run in 3**, then
+**2 in 8** after a first repair attempt. That is a real problem, not a nuisance:
+a test that reds CI for ambient reasons trains people to re-run instead of read,
+and it breaks "keep CI green" for reasons unrelated to the code.
+
+Three versions, and the reasoning matters more than the fix:
+
+1. **Fixed budget** (`worst < 0.050`). Measured the machine, not the code — GIL
+   contention and OS scheduling produce 50 ms gaps with no blocking work at all.
+2. **Relative to ambient jitter sampled once, immediately after.** Still 2 in 8:
+   load varies *between* the two windows, so a busy handler window compared
+   against a calm ambient window fires spuriously.
+3. **Minimum over three repeats**, ambient sampled alongside each. Stable — 10
+   consecutive runs green, and the full suite green 3× in a row.
+
+Why the minimum is legitimate here rather than a way of making a failing test
+pass: the two cases are **asymmetric**. Synchronous work parks the loop for its
+whole duration *every single time*, so its minimum is still ≈ elapsed. Ambient
+jitter is a transient spike, so a minimum over three samples converges on the true
+noise floor. The statistic that is robust to noise is precisely the one that is
+*not* robust to a real block.
+
+And it is proven, not asserted: `test_the_harness_still_detects_a_real_block`
+runs `verify_chain()` synchronously on the loop — exactly as the endpoint used to
+— and **requires the assertion to fire**. Both earlier failure modes of this
+harness (the vacuous pass, then the flake) were invisible without that.
+
+**Tests 296 → 301.**
+
 ### The Pre-Cog panel badged invented memory figures as "live"
 
 `god_mode_orchestrator.py`'s docstring and SECURITY.md both promise that
@@ -573,6 +605,25 @@ Corrected the test and said why in it.
 
 Evidence: `docs/audit-evidence/t2/precog-provenance-defect.txt`.
 **Tests 286 → 296.**
+
+### `recommended_context_k` was the unchanged default, presented as a recommendation
+
+A subtler case of the same mislabel, found while auditing the rest of the
+orchestrator. `execute_llm_judge` reports `recommended_context_k` inside a payload
+badged `data_source: "live"`, and `LLMJudgePanel.tsx` renders it as
+"Recommended k" next to "Elevated k: 8".
+
+But `suggest_context_k` returns a bare int, and returning `base_k` is ambiguous:
+it can mean "the history was consulted and says 4 is enough" or "there was no
+history, so nothing was consulted". With no verified MCP server it is **always**
+the second — so a reader concluded the agent examined CWE failure history and
+chose 4, when it examined nothing.
+
+Added `suggest_context_k_detailed() -> (k, informed)`, with `suggest_context_k`
+kept as a thin wrapper so `ai_agent`'s import and the existing contract are
+untouched. The payload now carries `context_k_source: "cwe_history" |
+"not_consulted"`. The synthetic demo branch — which reports `ELEVATED_CONTEXT_K`
+to make the demo narrative land — is labelled `not_consulted` too.
 
 ### One of the four advertised self-observation loops does not fire
 
@@ -1069,7 +1120,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 296 passed
+pytest tests/                                -> 301 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -1107,7 +1158,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 296 passed
+python -m pytest tests/          # expect 301 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -1198,6 +1249,11 @@ Blocking first:
   It was not corruption — it was a type mismatch between the writer and the
   reader, and the misleading message is why nobody looked. An error handler that
   names a cause is asserting something, and it can be wrong.
+- **A flaky test is not a lesser problem than a missing one.** Mine failed 1 in
+  3, then 2 in 8. Fix it by finding a statistic that is robust to the noise but
+  *not* robust to the defect — and prove that with a test that requires the
+  harness to fail on known-bad input. "Loosen the threshold until it passes" is
+  the wrong move and looks identical in the diff.
 - **A green test against a defect you have already measured means the harness is
   wrong.** The event-loop starvation harness passed against the known-blocking
   handler because its baseline was taken after the blocking call finished. Verify
@@ -1223,4 +1279,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `79c2b6b` + this update. CI green on runs 21-34, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `b34353b` + this update. CI green on runs 21-34, all four jobs.*

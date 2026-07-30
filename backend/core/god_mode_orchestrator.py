@@ -87,7 +87,8 @@ from backend.core.self_observer import (
     ELEVATED_CONTEXT_K,
     adaptive_select_model,
     is_conservation_mode,
-    suggest_context_k,
+    suggest_context_k,  # noqa: F401  (public name kept for compatibility)
+    suggest_context_k_detailed,
 )
 
 # mcp_client is the thing self_observer.py itself reads telemetry through —
@@ -487,12 +488,21 @@ async def execute_llm_judge(code: Optional[str] = None, cwe_id: Optional[str] = 
                     }
                 )
 
+            # `recommended_context_k` is rendered by LLMJudgePanel.tsx as
+            # "Recommended k" inside a payload badged data_source "live". The
+            # bare int cannot say whether the CWE history was consulted or
+            # simply unavailable, and with no verified MCP server it is ALWAYS
+            # unavailable — so the value was the unchanged default presented as a
+            # telemetry-derived recommendation. The detailed form reports both.
             elevated_k = None
+            context_k_informed = False
             try:
                 candidate_ids = [v.cwe_id for v in scan.vulnerabilities]
-                elevated_k = await suggest_context_k(candidate_ids, base_k=4)
+                elevated_k, context_k_informed = await suggest_context_k_detailed(
+                    candidate_ids, base_k=4
+                )
             except Exception:  # noqa: BLE001
-                logger.exception("execute_llm_judge: suggest_context_k() failed")
+                logger.exception("execute_llm_judge: suggest_context_k_detailed() failed")
 
             return {
                 "run_id": run_id,
@@ -504,6 +514,7 @@ async def execute_llm_judge(code: Optional[str] = None, cwe_id: Optional[str] = 
                 "flagged_count": sum(1 for v in verdicts if v["suspected_hallucination"]),
                 "verdicts": verdicts,
                 "recommended_context_k": elevated_k,
+                "context_k_source": "cwe_history" if context_k_informed else "not_consulted",
                 "cwe_failure_rate_threshold": CWE_FAILURE_RATE_THRESHOLD,
                 "elevated_context_k": ELEVATED_CONTEXT_K,
             }
@@ -536,6 +547,10 @@ async def execute_llm_judge(code: Optional[str] = None, cwe_id: Optional[str] = 
             }
         ],
         "recommended_context_k": ELEVATED_CONTEXT_K,
+        # This whole branch is the no-code demo path, so nothing consulted any
+        # CWE history — the k above is the configured elevated constant, chosen to
+        # make the demo narrative land, not a recommendation derived from data.
+        "context_k_source": "not_consulted",
         "cwe_failure_rate_threshold": CWE_FAILURE_RATE_THRESHOLD,
         "elevated_context_k": ELEVATED_CONTEXT_K,
     }

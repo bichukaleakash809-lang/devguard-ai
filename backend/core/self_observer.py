@@ -201,30 +201,61 @@ CWE_FAILURE_RATE_THRESHOLD: float = float(
 ELEVATED_CONTEXT_K: int = int(os.getenv("ELEVATED_CONTEXT_K", "8"))
 
 
-async def suggest_context_k(candidate_cwe_ids: list[str], base_k: int = 4) -> int:
+async def suggest_context_k_detailed(
+    candidate_cwe_ids: list[str], base_k: int = 4
+) -> tuple[int, bool]:
     """Telemetry in: historical validator-failure rate per CWE.
-    Decision out: how much RAG context (`k`) to retrieve for this scan.
+    Decision out: `(k, informed)` — how much RAG context to retrieve, and
+    whether any CWE history was actually available to base that on.
+
+    THE `informed` FLAG EXISTS BECAUSE THE BARE INT IS AMBIGUOUS. Returning
+    `base_k` can mean two completely different things:
+
+      * the history was consulted and says base_k is enough, or
+      * there was no history at all, so nothing was consulted.
+
+    `get_cwe_failure_pattern` has **no local fallback** — unlike
+    `get_recent_cost_trend`, which falls back to `local_telemetry` — so with no
+    verified SigNoz MCP server it returns `available=False` every time and this
+    function always returns `base_k`. `god_mode_orchestrator.execute_llm_judge`
+    reports the value as `recommended_context_k` inside a payload badged
+    `data_source: "live"`, and `LLMJudgePanel.tsx` renders it as "Recommended k".
+    A reader would conclude the agent examined CWE history and decided 4 was
+    enough. It examined nothing.
     """
     if not candidate_cwe_ids:
-        return base_k
+        return base_k, False
 
     client = get_mcp_client()
     max_failure_rate = 0.0
+    informed = False
     for cwe_id in candidate_cwe_ids:
         pattern = await client.get_cwe_failure_pattern(cwe_id)
         if pattern.available:
+            informed = True
             max_failure_rate = max(max_failure_rate, pattern.fail_rate)
 
-    if max_failure_rate > CWE_FAILURE_RATE_THRESHOLD:
+    if informed and max_failure_rate > CWE_FAILURE_RATE_THRESHOLD:
         logger.info(
             "suggest_context_k: elevated k=%d for %s (max_failure_rate=%.2f)",
             ELEVATED_CONTEXT_K,
             candidate_cwe_ids,
             max_failure_rate,
         )
-        return ELEVATED_CONTEXT_K
+        return ELEVATED_CONTEXT_K, True
 
-    return base_k
+    return base_k, informed
+
+
+async def suggest_context_k(candidate_cwe_ids: list[str], base_k: int = 4) -> int:
+    """Backwards-compatible wrapper returning just the `k`.
+
+    Kept because `ai_agent` imports this name and the orchestrator calls it.
+    Prefer `suggest_context_k_detailed` in any caller that reports the value to a
+    human — a bare `base_k` cannot say whether it was an informed decision.
+    """
+    k, _ = await suggest_context_k_detailed(candidate_cwe_ids, base_k)
+    return k
 
 
 # ── 4. CostGuardian ───────────────────────────────────────────────────────────

@@ -188,6 +188,56 @@ def test_the_scanner_retrieves_at_the_default_depth(monkeypatch):
     assert seen["k"] == 4
 
 
+def test_the_detailed_form_reports_whether_the_history_was_available():
+    """`suggest_context_k` returns only an int, so a caller cannot tell whether
+    a returned `base_k` means "history says base_k is enough" or "there was no
+    history". Those are different facts, and the Truth Serum panel renders the
+    value as `Recommended k` inside a payload badged `data_source: "live"`.
+    """
+    k, informed = run(self_observer.suggest_context_k_detailed(["CWE-89"], base_k=4))
+    assert k == 4
+    assert informed is False, (
+        "reported the CWE history as consulted when no MCP server answered"
+    )
+
+
+def test_the_detailed_form_reports_informed_when_history_exists():
+    class _Pattern:
+        available = True
+        fail_rate = 0.05
+
+    class _Client:
+        async def get_cwe_failure_pattern(self, cwe_id):
+            return _Pattern()
+
+    import backend.core.self_observer as so
+
+    original = so.get_mcp_client
+    so.get_mcp_client = lambda: _Client()
+    try:
+        k, informed = run(so.suggest_context_k_detailed(["CWE-89"], base_k=4))
+        assert k == 4, "a 0.05 fail rate is below the threshold, so k stays at base"
+        assert informed is True, "the history WAS consulted; that is the distinction"
+    finally:
+        so.get_mcp_client = original
+
+
+def test_the_plain_form_still_returns_a_bare_int():
+    """Backwards compatibility: `suggest_context_k` is imported by ai_agent and
+    called by the orchestrator. Its contract must not change underneath them."""
+    assert run(self_observer.suggest_context_k(["CWE-89"], base_k=4)) == 4
+
+
+def test_the_truth_serum_payload_says_whether_k_was_informed():
+    """The consequence, at the surface that renders it."""
+    from backend.core import god_mode_orchestrator as gmo
+
+    result = run(gmo.execute_llm_judge(cwe_id="CWE-89"))
+    # No code supplied -> the synthetic branch, which must not claim otherwise.
+    assert result["data_source"] == "synthetic"
+    assert result["context_k_source"] == "not_consulted"
+
+
 # --------------------------------------------------------------------------- #
 # Loop 1, Telemetry-Aware Router: fires, and is already covered
 # --------------------------------------------------------------------------- #
