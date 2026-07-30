@@ -100,6 +100,7 @@ Any deployment whose collector went away would have hung on restart or redeploy.
 | `9716701` | **RAG: fixed non-deterministic retrieval + found both heavy backends are dead** |
 | `0a7341d` | **Pipeline: clean-code short-circuit; removed fake SigNoz log claims** |
 | `7678d26` | **Benchmark: a failed scan is no longer reported as a clean scan** |
+| `0c7ac2a` | **Performance: audit append was O(N) in log size, on the event loop** |
 
 ### Pipeline — two real defects (commit `0a7341d`)
 
@@ -135,7 +136,28 @@ compatible) plus per-snippet `errored` now make it visible; the negative control
 `clean_parameterized` correctly stays `errored=0`.
 Evidence: `docs/audit-evidence/t2/benchmark-defect.txt`
 
-**Tests now 102.** CI green on runs 6, 8, 9 and 11 (runs 7 and 10 were cancelled by rapid follow-up pushes, not failures).
+### Performance — audit append was O(N) per call (commit `0c7ac2a`)
+
+`_read_last_entry()` iterated the whole audit log to read one field, once per
+append — O(N²) over the log's life — and did it synchronously inside
+`append_entry`'s lock, so it blocked the **event loop**, stalling unrelated
+requests. Measured ms/append by existing log size:
+
+```
+entries      BEFORE       AFTER
+      0      0.112 ms     0.379 ms
+  1 000      0.338 ms     0.314 ms
+ 10 000      2.738 ms     0.405 ms
+ 50 000     13.823 ms     0.368 ms
+```
+
+123× degradation → flat. Fixed with a seek-from-end tail read plus
+`asyncio.to_thread`. Honest tradeoff: the empty case costs ~0.27 ms more (the
+thread hop) — a fixed cost replacing an unbounded one. A wrong tail read would
+fork the chain silently, so 8 tests cover the edge cases.
+Evidence: `docs/audit-evidence/t2/audit-performance.txt`
+
+**Tests now 110.** CI green on runs 6, 8, 9 and 11 (runs 7 and 10 were cancelled by rapid follow-up pushes, not failures).
 
 ### RAG — two real defects (commit `9716701`)
 
@@ -185,11 +207,12 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 102 passing**, all with no API key, no collector, no network:
+**Test inventory — 110 passing**, all with no API key, no collector, no network:
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
   bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
   length, no raw dicts across boundaries, empty code rejected before any LLM call
-- `test_audit_chain.py` (11) — tamper-evidence *demonstrated*, not asserted.
+- `test_audit_chain.py` (19) — tamper-evidence *demonstrated*, not asserted,
+  plus the tail-read edge cases (empty/whitespace/corrupt/multi-chunk).
   In-place edit, code_hash swap, deletion, reordering and forged append are all
   caught. The key one: an attacker who recomputes the edited record's own hash
   defeats the per-record check but not the link check.
