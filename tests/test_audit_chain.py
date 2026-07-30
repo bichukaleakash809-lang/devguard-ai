@@ -180,6 +180,81 @@ def test_report_names_the_scan_that_broke(populated):
     assert report["scan_id"] == "scan-3"
 
 
+# --------------------------------------------------------------------------- #
+# Tail read — the O(1) replacement for a full-file scan
+# --------------------------------------------------------------------------- #
+
+def test_tail_read_on_a_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "AUDIT_LOG_PATH", str(tmp_path / "nope.jsonl"))
+    assert audit._read_last_entry() is None
+
+
+def test_tail_read_on_an_empty_file(chain):
+    chain.write_text("")
+    assert audit._read_last_entry() is None
+
+
+def test_tail_read_on_a_whitespace_only_file(chain):
+    chain.write_text("\n\n   \n")
+    assert audit._read_last_entry() is None
+
+
+def test_tail_read_with_a_single_entry(populated, chain):
+    entries = _entries(chain)
+    last = audit._read_last_entry()
+    assert last["entry_hash"] == entries[-1]["entry_hash"]
+
+
+def test_tail_read_tolerates_trailing_newlines(populated, chain):
+    expected = _entries(chain)[-1]["entry_hash"]
+    chain.write_text(chain.read_text() + "\n\n")
+    assert audit._read_last_entry()["entry_hash"] == expected
+
+
+def test_tail_read_spans_multiple_chunks(chain, monkeypatch, anyio_backend):
+    """The backward walk must keep growing its read until it finds a newline.
+
+    Forced with a tiny chunk size so the loop iterates many times over a file
+    it cannot cover in one read.
+    """
+    import anyio
+
+    monkeypatch.setattr(audit, "_TAIL_CHUNK_BYTES", 16)
+
+    async def build():
+        for i in range(40):
+            await _append(f"scan-{i}", "d" * 64, "pass")
+
+    anyio.run(build)
+
+    entries = _entries(chain)
+    assert len(entries) == 40
+    assert audit._read_last_entry()["entry_hash"] == entries[-1]["entry_hash"]
+    # And the chain the tail read produced is internally consistent.
+    assert audit.verify_chain()["valid"] is True
+
+
+def test_tail_read_reports_a_corrupt_tail(populated, chain):
+    chain.write_text(chain.read_text() + "{not json\n")
+    assert audit._read_last_entry() is None
+
+
+def test_appending_to_a_large_log_keeps_the_chain_intact(chain, anyio_backend):
+    """Regression guard: the tail read must find the true last entry, not a
+    stale one. A wrong prev_hash would fork the chain silently."""
+    import anyio
+
+    async def build():
+        for i in range(300):
+            await _append(f"scan-{i}", "e" * 64, "pass")
+
+    anyio.run(build)
+
+    report = audit.verify_chain()
+    assert report["valid"] is True
+    assert report["entries_checked"] == 300
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
