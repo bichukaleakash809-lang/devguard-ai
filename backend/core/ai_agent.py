@@ -444,13 +444,26 @@ async def _call_llm(
     except Exception as exc:  # noqa: BLE001 — deliberate: normalize ALL SDK errors
         raise AgentExecutionError(agent, f"LLM call failed on model {model}", cause=exc)
 
-    # SELF-OBSERVATION: shadow-record this call's approximate cost locally,
-    # so get_recent_cost_trend has real numbers even before MCP is fully wired.
+    # SELF-OBSERVATION: shadow-record this call's cost locally, so
+    # get_recent_cost_trend has real numbers even before MCP is wired up.
+    #
+    # The EXACT cost is passed whenever the provider reported usage. This used to
+    # pass only the prompt and completion text and let the shadow approximate at
+    # (chars / 4), which under-reported by up to 13% on a single call and 5.9%
+    # over a pipeline run. That total gates COST_BUDGET_USD_PER_30MIN, so
+    # under-reporting delayed conservation mode and let spend overshoot the
+    # ceiling. The texts are still passed so the shadow can fall back to its
+    # estimate for a streaming call, where usage is unknown until the stream
+    # drains.
+    #
     # Best-effort only — a recording failure must never break a scan, so any
     # exception here is swallowed rather than propagated or logged noisily.
     try:
         out_text = "" if stream else (resp.choices[0].message.content or "")
-        record_llm_call(model, user_prompt, out_text)
+        record_llm_call(
+            model, user_prompt, out_text,
+            cost_usd=None if stream else _call_cost(resp, model),
+        )
     except Exception:  # noqa: BLE001 — never let cost tracking break a scan
         pass
 

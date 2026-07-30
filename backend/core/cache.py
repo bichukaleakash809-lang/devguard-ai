@@ -77,7 +77,21 @@ def _normalize(code: str) -> str:
 
 
 def cache_key(request: ScanRequest) -> str:
-    """Deterministic content-addressed key. Pure + unit-testable."""
+    """Deterministic content-addressed key. Pure + unit-testable.
+
+    NOTE ON THE `severity` COMPONENT: it is **always the empty string**.
+    `ScanRequest.model_fields` is exactly `['code', 'language']`, so
+    `getattr(request, "severity", "")` never finds anything — verified:
+    `cache_key(ScanRequest(code=c)) == cache_key(ScanRequest(code=c,
+    severity="critical"))`.
+
+    That is correct, and it has to stay that way. Severity is a *finding*, not an
+    input: nothing has scanned the code when the request arrives, so a key
+    computed before the scan cannot include it. The component is kept only so the
+    key shape stays stable for any entries already written. The module docstring
+    above describes the key as `code + language + severity_policy_version`; the
+    severity part of that has never contributed a byte.
+    """
     payload = "|".join(
         [
             _normalize(request.code),

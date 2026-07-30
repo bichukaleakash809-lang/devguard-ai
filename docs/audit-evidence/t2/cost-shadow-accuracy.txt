@@ -1,0 +1,71 @@
+==============================================================================
+THE COST SHADOW GATES A ROUTING DECISION
+==============================================================================
+
+self_observer.adaptive_select_model compares local_telemetry's 30-minute
+total against COST_BUDGET_USD_PER_30MIN to decide whether to downgrade the
+Fixer's model. These numbers are load-bearing, not decoration.
+
+DEFECT 1 — it approximated when the exact figure was available.
+
+Cost was (len(text_in) + len(text_out)) / 4 tokens at a flat per-model
+price. The module's own docstring said: 'Swap in real usage.total_tokens
+from the Groq response later for exact figures.' That became possible when
+ai_agent._call_cost landed — the provider's split sits in the same function
+that calls record_llm_call.
+
+  call shape                              old heuristic         real     error
+  scanner: 6KB code in, 1KB JSON out    $     0.001050$   0.001082     -3.0%
+  fixer: 6KB in, 6KB patch out          $     0.001800$   0.002070    -13.0%
+  validator: 12KB in, 500B out          $     0.001875$   0.001869     +0.3%
+  tiny: 200B in, 100B out               $     0.000045$   0.000049     -8.2%
+  TOTAL over one pipeline run           $     0.004770$   0.005070     -5.9%
+
+  It UNDER-reported. So the 30-minute total crossed the budget ceiling
+  LATER than it should have and spend overshot before conservation mode
+  engaged — the wrong direction for a cost guard. The error is not a
+  constant offset that averages out either: it tracks the prompt/completion
+  ratio, because a flat price cannot be right for both when real pricing
+  splits them (0.59 vs 0.79 per 1M).
+
+DEFECT 2 — two independent price tables for the same models.
+
+  telemetry.MODEL_PRICING_USD_PER_1M   per 1M, (prompt, completion) split
+  local_telemetry.PRICE_PER_1K_TOKENS_USD   per 1K, flat  <- REMOVED
+
+  Update one and the other silently diverges, and the stale one gates the
+  budget. There is now one table, in telemetry.py.
+
+==============================================================================
+AFTER
+==============================================================================
+
+  exact costs recorded:      4
+  total:                     $0.005070   (was $0.004770)
+  estimated_samples:         0
+  exact:                     True
+
+  the fallback estimate remains for streaming calls, where usage is not
+  known until the stream drains — and it now prices through the same table:
+    estimate(4000 chars in, 4000 out) = $0.001380
+    compute_cost_usd(1000, 1000)      = $0.001380   <- identical
+
+  a completion-heavy call now estimates higher than a prompt-heavy one of
+  the same size, which a flat price could never express:
+    prompt-heavy     $0.001338
+    completion-heavy $0.001698
+
+  and an unknown model inherits telemetry.py's deliberate bias of pricing
+  high 'so unknown spend is never under-reported':
+    unknown model $0.002000  vs  known $0.001380
+
+  a window containing ANY estimate reports itself inexact, so a decision
+  made on approximations can say so:
+    estimated_samples=1  exact=False
+
+  threaded onto CostTrend: source='local_shadow' exact=False
+    provenance (`source`) and accuracy (`exact`) are orthogonal — a
+    local_shadow total CAN be exact, and conflating the two is what
+    previously let an estimate be surfaced as 'live'.
+
+ALL ASSERTIONS PASSED

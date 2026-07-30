@@ -29,7 +29,7 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed** (failed open on casing variance), **the human-in-the-loop approval gate fixed** (never opened at all), **the audit trail now records a real verdict** (35/35 entries said `unknown`). Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 263, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 277, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 263 passing**, all with no API key, no collector, no network.
+**Test inventory — 277 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -266,6 +266,9 @@ false-negative risk is real and stated.
 - `test_audit_verdict.py` (11) — the audit record carries the real verdict, the
   four outcomes stay distinguishable, and tampering with a recorded verdict is
   detected
+- `test_local_cost_shadow.py` (14) — the budget-gating total uses exact
+  provider costs, prices through the single shared table, and reports when any
+  part of a window was approximated
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -525,6 +528,56 @@ missing `created_at` is never discarded — no pending human decision is thrown
 away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
+
+### The budget-gating cost shadow approximated when exact figures were available
+
+`local_telemetry.py` is not decoration: `self_observer.adaptive_select_model`
+compares its 30-minute total against `COST_BUDGET_USD_PER_30MIN` to decide whether
+to downgrade the Fixer's model. Its numbers gate a routing decision.
+
+**1. It estimated when the real figure was in the same function.** Cost was
+`(len(text_in) + len(text_out)) / 4` tokens at a flat per-model price. The
+module's own docstring said *"Swap in real `usage.total_tokens` from the Groq
+response later for exact figures"* — which became possible once
+`ai_agent._call_cost` landed, since the provider's prompt/completion split sits
+in the same function that calls `record_llm_call`.
+
+```
+call shape                            old heuristic        real     error
+scanner: 6KB code in, 1KB JSON out      $0.001050    $0.001082    -3.0%
+fixer: 6KB in, 6KB patch out            $0.001800    $0.002070   -13.0%
+validator: 12KB in, 500B out            $0.001875    $0.001869    +0.3%
+TOTAL over one pipeline run             $0.004770    $0.005070    -5.9%
+```
+
+It **under**-reported, so the 30-minute total crossed the ceiling *later* than it
+should and spend overshot before conservation mode engaged — the wrong direction
+for a cost guard. The error is not a constant offset that averages out: it tracks
+the prompt/completion ratio, because a flat price cannot be right for both when
+real pricing splits them (0.59 vs 0.79 per 1M).
+
+**2. Two independent price tables for the same models.**
+`telemetry.MODEL_PRICING_USD_PER_1M` (per 1M, split) and
+`local_telemetry.PRICE_PER_1K_TOKENS_USD` (per 1K, flat). Update one and the other
+silently diverges, with the stale one gating the budget. The second table is
+**removed**; the shadow prices through `compute_cost_usd`, so a completion-heavy
+call now correctly estimates higher than a prompt-heavy one of the same size, and
+an unknown model inherits `telemetry.py`'s deliberate bias of pricing high "so
+unknown spend is never *under*-reported".
+
+The chars/4 estimate remains as the fallback for streaming calls, where usage is
+unknown until the stream drains. A window containing **any** estimate now reports
+`exact: False`, threaded onto `CostTrend` — so a decision made on approximations
+can say so. `source` (provenance) and `exact` (accuracy) are deliberately
+orthogonal: a `local_shadow` total *can* be exact, and conflating the two is what
+previously let an estimate be surfaced as "live".
+
+Also documented the cache key's dead `severity` component: it is always the empty
+string because `ScanRequest` has no such field, and it must stay that way —
+severity is a finding, so a key computed before the scan cannot include it.
+
+Evidence: `docs/audit-evidence/t2/cost-shadow-accuracy.txt`.
+**Tests 263 → 277.**
 
 ### The human-in-the-loop approval gate never opened, and the audit log recorded nothing
 
@@ -933,7 +986,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 263 passed
+pytest tests/                                -> 277 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -960,7 +1013,7 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
 `live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`,
 `python-dependency-advisories.txt`, `cache-round-trip-defect.txt`, `cost-accounting-defect.txt`,
-`approval-gate-and-verdict-defect.txt`.
+`approval-gate-and-verdict-defect.txt`, `cost-shadow-accuracy.txt`.
 
 ---
 
@@ -971,7 +1024,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 263 passed
+python -m pytest tests/          # expect 277 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -1087,4 +1140,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `b3655a0` + this update. CI green on runs 21-28, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `3d72631` + this update. CI green on runs 21-33, all four jobs.*

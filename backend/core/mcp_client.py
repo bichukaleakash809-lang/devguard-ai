@@ -103,8 +103,14 @@ class CostTrend(BaseModel):
 
       - ``"signoz_mcp"``   retrieved from the SigNoz MCP server
       - ``"local_shadow"`` computed in-process by ``local_telemetry.py`` — real
-                           for this process, but an estimate, and never
-                           retrieved telemetry
+                           for this process, and never retrieved telemetry.
+                           Whether the numbers are measured or approximated is a
+                           SEPARATE question, answered by ``exact`` below: the
+                           shadow now records provider-reported cost when the SDK
+                           supplies usage, and falls back to a chars/4 estimate
+                           only when it does not. This docstring used to say
+                           local_shadow was always "an estimate", which
+                           understated it once exact costs were threaded in.
       - ``"unavailable"``  no data
 
     Callers that render provenance MUST branch on ``source``, not on
@@ -121,6 +127,17 @@ class CostTrend(BaseModel):
     # Assumption (per task spec): spans carry `llm.served_by` identifying which
     # model tier handled the request, letting us break cost down by tier.
     cost_by_model: dict[str, float] = Field(default_factory=dict)
+    exact: bool = Field(
+        default=True,
+        description=(
+            "False when any sample in the window was approximated rather than "
+            "read from provider-reported usage. Orthogonal to `source`: a "
+            "local_shadow total can be exact, and a signoz_mcp total is exact by "
+            "construction. Surfaced because this total gates "
+            "COST_BUDGET_USD_PER_30MIN — a routing decision made on estimates "
+            "should be able to say so."
+        ),
+    )
     error: Optional[str] = None
 
 
@@ -312,6 +329,10 @@ class SignozMCPClient:
                 avg_cost_per_request_usd=local["avg_cost_per_request_usd"],
                 request_count=local["request_count"],
                 cost_by_model=local["cost_by_model"],
+                # Provenance is `source`; accuracy is `exact`. Threading it
+                # through means a caller that acts on this total can tell whether
+                # it was measured or approximated.
+                exact=local["exact"],
                 error=f"MCP unreachable, using local fallback: {exc}",
             )
 
