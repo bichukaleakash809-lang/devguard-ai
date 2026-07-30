@@ -156,7 +156,7 @@ Stated plainly, because a claim a judge can disprove costs more than the feature
   That artifact is the **only** route by which a number reaches the API or the
   UI — nothing is hard-coded at either end, and the harness refuses to write it
   if any scan errored (pass `--allow-errored` to override).
-- **Test coverage is real but partial.** 225 tests run in CI on every push, with
+- **Test coverage is real but partial.** 238 tests run in CI on every push, with
   no API key, no collector and no network: schema contracts, audit chain
   tamper-detection, the paginated audit read, circuit breaker, telemetry
   fail-safety, the prompt-injection boundary, RAG determinism, the benchmark

@@ -145,6 +145,17 @@ class ScanResult(BaseModel):
             "ai_agent._strip_measured_fields."
         ),
     )
+    cost_usd: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "USD cost of this agent's call, computed from the provider-reported "
+            "prompt/completion split at the call site — the only place that split "
+            "is known. None when nothing counted the tokens; see tokens_used for "
+            "why None and 0.0 must stay distinguishable. Summed per request by "
+            "backend/api/router.py:_compute_and_record_cost."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +185,11 @@ class FixResult(BaseModel):
         default=None,
         ge=0,
         description="Provider-reported total tokens for this call. See ScanResult.tokens_used.",
+    )
+    cost_usd: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="USD cost of this call. See ScanResult.cost_usd.",
     )
 
 
@@ -206,6 +222,11 @@ class ValidationResult(BaseModel):
         default=None,
         ge=0,
         description="Provider-reported total tokens for this call. See ScanResult.tokens_used.",
+    )
+    cost_usd: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="USD cost of this call. See ScanResult.cost_usd.",
     )
 
 

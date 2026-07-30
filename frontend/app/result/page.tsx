@@ -85,8 +85,15 @@ interface ScanResult {
   retry_history: RetryAttempt[];
   model_routing: ModelRouting;
   latency_ms: number;
+  // Spend on THIS request. A cache hit makes zero LLM calls, so both are zero /
+  // null for one — the figures that produced the result live in origin_* below.
+  // Billing the cached run's tokens again on every repeat scan would
+  // double-count spend.
   tokens_used: number | null; // null = nothing counted them; never a measured 0
-  cost_usd: number;
+  cost_usd: number | null;
+  cached: boolean;
+  origin_tokens_used: number | null; // what producing this result actually took
+  origin_cost_usd: number | null;
   slo_status: SloStatus;
   audit_entry: AuditEntry;
   benchmark_report: BenchmarkReport | null; // null until the harness has run
@@ -592,20 +599,36 @@ function ResultDashboard() {
                     claim a scan consumed no tokens, which is never true. */}
                 <MetricCard
                   index={1} label="Tokens Used"
-                  value={result.tokens_used ?? 0}
+                  value={result.cached ? (result.origin_tokens_used ?? 0) : (result.tokens_used ?? 0)}
                   decimals={0} icon={<IconChip />} accent="violet"
                   baselineNote={
-                    result.tokens_used === null
-                      ? "not reported by the provider"
-                      : "prompt + completion, all agents"
+                    result.cached
+                      ? "from the cached run — this request used none"
+                      : result.tokens_used === null
+                        ? "not reported by the provider"
+                        : "prompt + completion, all agents"
                   }
                 />
               </div>
               <div className="glow-card rounded-2xl">
+                {/* `baselineNote` used to read "vs ~$85 for 1hr human review".
+                    No human-review baseline was ever measured, so there was
+                    nothing to compare against. The measured value stands alone.
+                    Cost was also always $0.00 before the accounting fix: the
+                    backend read prompt/completion tokens off a PipelineResult
+                    that has neither field. */}
                 <MetricCard
-                  index={2} label="Cost" value={result.cost_usd} prefix="$"
+                  index={2} label="Cost"
+                  value={result.cached ? (result.origin_cost_usd ?? 0) : (result.cost_usd ?? 0)}
+                  prefix="$"
                   decimals={4} icon={<IconCoin />} accent="emerald"
-                  baselineNote="vs ~$85 for 1hr human review"
+                  baselineNote={
+                    result.cached
+                      ? "cached — this request cost nothing"
+                      : result.cost_usd === null
+                        ? "not reported by the provider"
+                        : "this scan, all agents"
+                  }
                 />
               </div>
             </motion.div>

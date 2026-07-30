@@ -1,0 +1,73 @@
+============================================================================
+PER-REQUEST COST WAS ALWAYS $0.00
+============================================================================
+
+PipelineResult fields: ['converged', 'final_fix', 'final_validation', 'original_code', 'reflection_history', 'routing_decisions', 'scan', 'self_observation']
+
+_compute_and_record_cost read result.model_id / .prompt_tokens /
+.completion_tokens. PipelineResult has NONE of them — its annotation said
+`result: ScanResult`, which was the tell. All three getattr calls fell
+through to defaults, so it computed:
+
+    compute_cost_usd('__default__', 0, 0) = 0.0
+
+...on EVERY scan. The Result Dashboard rendered $0.00 as a Cost metric card
+for requests that had just made up to seven paid LLM calls, and the
+cost_calc span carried llm.prompt_tokens: 0 / llm.cost_usd: 0 into SigNoz.
+
+The real per-call cost WAS recorded correctly inside _call_llm ->
+record_llm_observability. So the aggregate counters were right while the
+per-request span and the API response said zero — two sources disagreeing,
+with the one a human reads being the wrong one.
+
+============================================================================
+AFTER — summed from what each agent actually spent
+============================================================================
+
+  scanner   tokens= 1412  cost=$0.000935
+  fixer     tokens=  900  cost=$0.000591
+  validator tokens=  340  cost=$0.000229
+  ------------------------------------------------
+  request                    cost=$0.001755
+
+  span attributes now sent to SigNoz:
+    llm.cost_usd             0.001755
+    llm.model_id             llama-3.3-70b-versatile
+    llm.total_tokens         2652
+    llm.usage_reported       True
+
+Cost is computed at the CALL SITE (ai_agent._call_cost) because that is the
+only place the prompt/completion split exists, and the two are priced
+differently — a total-token figure cannot be converted to cost after the fact.
+
+============================================================================
+devguard.llm.tokens_per_sec HAD NEVER RECEIVED AN OBSERVATION
+============================================================================
+
+_emit_request_metrics read the same missing token fields, so total_tokens
+was always 0 and the `if total_tokens and ...` guard never passed.
+
+  observations recorded now: 1  value=1326.0 tokens/sec
+
+============================================================================
+A CACHE HIT MUST NOT BE BILLED AGAIN (newly reachable)
+============================================================================
+
+The cache never hit before, so this path had never run. A cached
+PipelineResult carries the ORIGINAL run's tokens and cost; charging them
+again on every repeat scan would double-count spend.
+
+                            fresh scan       cache hit
+  cached                         False            True
+  tokens_used                     2652            None
+  cost_usd                    0.001755        0.000000
+  origin_tokens_used              2652            2652
+  origin_cost_usd             0.001755        0.001755
+
+  -> this request cost nothing; what producing the result took is still
+     reported, under a name that says whose spend it was.
+
+Also removed: the Cost card's baselineNote 'vs ~$85 for 1hr human review'.
+No human-review baseline was ever measured.
+
+ALL ASSERTIONS PASSED

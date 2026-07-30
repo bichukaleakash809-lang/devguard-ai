@@ -29,7 +29,7 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 225, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 238, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 225 passing**, all with no API key, no collector, no network.
+**Test inventory — 238 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -258,6 +258,8 @@ false-negative risk is real and stated.
   slower
 - `test_cache_round_trip.py` (16) — the cache reads back what it writes, a
   wrong-shaped entry stays a miss, and hit/miss counters match reality
+- `test_cost_accounting.py` (13) — per-request cost is summed from real agent
+  spend, `tokens_per_sec` actually fires, and a cache hit is not billed twice
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -517,6 +519,62 @@ missing `created_at` is never discarded — no pending human decision is thrown
 away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
+
+### Per-request cost was always $0.00, and a documented metric had never fired
+
+Same root cause as the cache defect, found by auditing the code path the cache
+fix had just made reachable: helpers written against `ScanResult` while being
+handed a `PipelineResult`. Their annotations still said `result: ScanResult`,
+which was the tell.
+
+```
+PipelineResult fields: converged, final_fix, final_validation, original_code,
+                       reflection_history, routing_decisions, scan,
+                       self_observation
+```
+
+**1. `_compute_and_record_cost`** read `result.model_id`, `result.prompt_tokens`
+and `result.completion_tokens`. None exist, so all three `getattr` calls fell
+through to defaults and it computed `compute_cost_usd("__default__", 0, 0)` =
+**0.0 on every scan**. The Result Dashboard rendered **$0.00** as a Cost metric
+card for requests that had just made up to seven paid LLM calls, and the
+`cost_calc` span carried `llm.prompt_tokens: 0` / `llm.cost_usd: 0` into SigNoz.
+
+The real per-call cost was always recorded correctly inside `_call_llm` →
+`record_llm_observability`, so the **aggregate counters were right while the
+per-request span and the API response said zero** — two sources disagreeing, with
+the one a human reads being the wrong one.
+
+**2. `_emit_request_metrics`** read the same two missing fields, so
+`total_tokens` was always 0 and the `if total_tokens and ...` guard never passed.
+`devguard.llm.tokens_per_sec`, documented in `telemetry.py`, had **never received
+a single observation**.
+
+**3. `_extract_score`** reads `eval_score`/`score`/`validator_score`, none of
+which exist either — but it has a fallback to `final_validation.eval_score`, so
+it works by accident. Now pinned by test as intended behaviour.
+
+Fixed by computing cost at the **call site** (`ai_agent._call_cost`), the only
+place the prompt/completion split exists — the two are priced differently, so a
+total-token figure cannot be converted to cost after the fact. `cost_usd` joins
+`tokens_used` on all three agent schemas and on `_MEASURED_FIELDS`, so the model
+cannot author it either. Measured after: scanner $0.000935 + fixer $0.000591 +
+validator $0.000229 = **$0.001755** per request, and `tokens_per_sec` records
+1326.0.
+
+**A cache hit must not be billed again** — newly reachable, because the cache had
+never hit. A cached `PipelineResult` carries the *original* run's tokens and
+cost, and charging them again on every repeat scan would double-count spend.
+`tokens_used`/`cost_usd` now describe **this** request (null / 0.0 on a hit);
+`origin_tokens_used`/`origin_cost_usd` report what producing the result actually
+took, under names that say whose spend it was.
+
+Also removed the Cost card's `baselineNote` **"vs ~$85 for 1hr human review"** —
+no human-review baseline was ever measured, the same class of invented comparison
+as the "38% faster" latency note removed earlier.
+
+Evidence: `docs/audit-evidence/t2/cost-accounting-defect.txt`.
+**Tests 225 → 238.**
 
 ### The scan cache could never read back what it wrote
 
@@ -803,7 +861,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 225 passed
+pytest tests/                                -> 238 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -829,7 +887,7 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
 `live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`,
-`python-dependency-advisories.txt`, `cache-round-trip-defect.txt`.
+`python-dependency-advisories.txt`, `cache-round-trip-defect.txt`, `cost-accounting-defect.txt`.
 
 ---
 
@@ -840,7 +898,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 225 passed
+python -m pytest tests/          # expect 238 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -913,6 +971,16 @@ Blocking first:
 - Do not claim a capability in a commit message before implementing it. This
   happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
   `f3bb8e5`.
+- **A wrong type annotation is a defect report.** Four separate bugs in this
+  session came from functions annotated `result: ScanResult` that are handed a
+  `PipelineResult`, reading fields that do not exist and silently getting
+  `getattr` defaults — cost 0.0, tokens 0, model `__default__`, an unreadable
+  cache. `getattr(x, "field", default)` on a typed object hides exactly this.
+  When you see a defensive `getattr` with a default, check whether the attribute
+  can ever be present.
+- **Fixing a dead code path makes new code reachable — audit it before shipping.**
+  The cache had never hit, so everything downstream of a cache hit had never run.
+  The cost double-count was found by going looking for that, not by accident.
 - **When a broad `except` logs a diagnosis, check the diagnosis.** The cache
   said "Corrupt cache entry" on every single read for the life of the project.
   It was not corruption — it was a type mismatch between the writer and the
@@ -943,4 +1011,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `1aa0b9e` + this update. CI green on runs 21-28, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `4503994` + this update. CI green on runs 21-28, all four jobs.*

@@ -190,6 +190,33 @@ def _total_tokens(resp) -> Optional[int]:
         return None
 
 
+def _call_cost(resp, model: str) -> Optional[float]:
+    """USD cost of one call, or None if the provider reported no usage.
+
+    Computed HERE because this is the only place the prompt/completion split
+    exists — prices differ between the two, so a total-token figure cannot be
+    converted to cost after the fact. `router.py` used to try anyway, reading
+    `result.prompt_tokens` / `result.completion_tokens` off a `PipelineResult`
+    that has neither field, so `compute_cost_usd("__default__", 0, 0)` returned
+    0.0 on every scan and the result page's Cost card read $0.00 forever.
+
+    Returns None rather than 0.0 when usage is absent, for the same reason
+    `_total_tokens` does: "this scan was free" is a claim, and it is false for a
+    scan that made paid calls the SDK simply did not report on.
+    """
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return None
+        prompt = getattr(usage, "prompt_tokens", None)
+        completion = getattr(usage, "completion_tokens", None)
+        if prompt is None and completion is None:
+            return None
+        return compute_cost_usd(model, int(prompt or 0), int(completion or 0))
+    except Exception:  # noqa: BLE001 — cost accounting must never break a scan
+        return None
+
+
 # Fields on an agent's Pydantic result that are MEASURED by DevGuard, not
 # authored by the model. The Fixer and Validator are constructed with
 # `Model(**data)` where `data` is parsed straight out of LLM JSON, so anything
@@ -197,7 +224,7 @@ def _total_tokens(resp) -> Optional[int]:
 # metric and `model_used` is the auditable routing record, so a model that
 # emitted either would be writing DevGuard's own telemetry. Both are stripped
 # from the parsed payload and re-set from the provider response.
-_MEASURED_FIELDS = ("tokens_used", "model_used")
+_MEASURED_FIELDS = ("tokens_used", "cost_usd", "model_used")
 
 
 def _strip_measured_fields(agent: str, data: dict) -> dict:
@@ -578,6 +605,7 @@ async def run_scanner(
         model_used=model,
         retrieved_cwe_ids=[e["cwe_id"] for e in retrieved],
         tokens_used=_total_tokens(resp),
+        cost_usd=_call_cost(resp, model),
     )
 
 
@@ -658,6 +686,7 @@ async def run_fixer(
     data = _strip_measured_fields("fixer", _parse_json_content("fixer", content))
     data["model_used"] = model
     data["tokens_used"] = _total_tokens(resp)
+    data["cost_usd"] = _call_cost(resp, model)
 
     # GOD-TIER: adaptive-routing cost-saved credit. Best-effort, never fatal.
     if override_model is not None and override_model != base_model:
@@ -775,6 +804,7 @@ async def run_validator(
     content = resp.choices[0].message.content
     data = _strip_measured_fields("validator", _parse_json_content("validator", content))
     data["tokens_used"] = _total_tokens(resp)
+    data["cost_usd"] = _call_cost(resp, MODEL_VALIDATOR)
     try:
         return ValidationResult(**data)
     except Exception as exc:  # noqa: BLE001

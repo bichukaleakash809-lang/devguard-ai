@@ -364,8 +364,9 @@ def _sum_tokens(*results) -> Optional[int]:
 
 def _build_frontend_result(
     scan_id: str, req: ScanRequest, pipeline, trace_id: str,
-    latency_ms: float, cost: float, status: str = "complete",
+    latency_ms: float, cost: Optional[float], status: str = "complete",
     finalized_entry: Optional[dict[str, Any]] = None,
+    cached_hit: bool = False,
 ) -> dict[str, Any]:
     """Reshape the internal PipelineResult into the exact JSON contract the
     Result Dashboard (frontend/app/result/page.tsx) expects.
@@ -440,12 +441,23 @@ def _build_frontend_result(
             "reason": f"severity-based routing ({max_sev})",
         },
         "latency_ms": round(latency_ms, 1),
-        # Real provider-reported usage, summed over the agents that ran. `null`
-        # when nothing counted them (streaming call, SDK without a `usage` block)
-        # — this was previously the literal 0 on every response while the UI
-        # rendered it as a "Tokens Used" metric.
-        "tokens_used": _sum_tokens(scan, final_fix, final_validation),
-        "cost_usd": cost,
+        # SPEND ON *THIS* REQUEST vs spend that produced the result.
+        #
+        # A cache hit makes zero LLM calls, so it consumed zero tokens and cost
+        # nothing — but the cached PipelineResult still carries the ORIGINAL
+        # run's figures. Billing them again on every repeat scan would
+        # double-count spend, and it only became reachable once the cache was
+        # fixed to actually hit (it never had before).
+        #
+        # So: `tokens_used` / `cost_usd` describe THIS request. The original
+        # run's figures are still reported, under names that say whose they are,
+        # because they are the honest answer to "what did producing this result
+        # take?".
+        "cached": cached_hit,
+        "tokens_used": None if cached_hit else _sum_tokens(scan, final_fix, final_validation),
+        "cost_usd": 0.0 if cached_hit else cost,
+        "origin_tokens_used": _sum_tokens(scan, final_fix, final_validation),
+        "origin_cost_usd": _sum_cost(scan, final_fix, final_validation),
         "slo_status": {
             "slo_target": SLO_TARGET_PCT,
             "error_budget_remaining_pct": budget,
@@ -568,7 +580,7 @@ async def scan(request: Request, x_traceparent: Optional[str] = Header(default=N
 
 async def _finalize_or_gate(
     scan_id: str, req: ScanRequest, result: ScanResult, trace_id: str,
-    latency_s: float = 0.0, cached_hit: bool = False, cost: float = 0.0,
+    latency_s: float = 0.0, cached_hit: bool = False, cost: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Human-in-the-loop gate (Feature #7): critical/high severity fixes PAUSE for
@@ -608,6 +620,7 @@ async def _finalize_or_gate(
         scan_id, req, result, trace_id, latency_s * 1000, cost,
         status="pending_approval" if gated else "complete",
         finalized_entry=finalized_entry,
+        cached_hit=cached_hit,
     )
     _remember_scan_result(scan_id, frontend_result)
 
@@ -843,28 +856,82 @@ async def ws_scan(websocket: WebSocket, scan_id: str):
 # ---------------------------------------------------------------------------
 # Metric helpers
 # ---------------------------------------------------------------------------
-def _compute_and_record_cost(result: ScanResult, span) -> float:
-    model_id = str(getattr(result, "model_id", "__default__"))
-    pt = int(getattr(result, "prompt_tokens", 0) or 0)
-    ct = int(getattr(result, "completion_tokens", 0) or 0)
-    cost = telemetry.compute_cost_usd(model_id, pt, ct)
+def _agents_of(result) -> tuple:
+    """The per-agent results a pipeline run produced, in execution order."""
+    return (
+        getattr(result, "scan", None),
+        getattr(result, "final_fix", None),
+        getattr(result, "final_validation", None),
+    )
+
+
+def _sum_cost(*results) -> Optional[float]:
+    """Total USD across the agents that reported a cost, or None if none did.
+
+    None, not 0.0 — "nothing counted it" is a different fact from "this scan was
+    free", and only one of them is ever true of a scan that made paid calls.
+    """
+    counted = [
+        c for c in (getattr(r, "cost_usd", None) for r in results if r is not None)
+        if c is not None
+    ]
+    return round(sum(counted), 8) if counted else None
+
+
+def _compute_and_record_cost(result, span) -> Optional[float]:
+    """Per-request cost, summed from what each agent actually spent.
+
+    This function used to read `result.model_id`, `result.prompt_tokens` and
+    `result.completion_tokens`. It is handed a `PipelineResult`, which has none
+    of those fields — its type annotation said `ScanResult`, which was the tell.
+    All three `getattr` calls fell through to their defaults, so it computed
+    `compute_cost_usd("__default__", 0, 0)` = **0.0 on every scan**. The Result
+    Dashboard rendered $0.00 as a "Cost" metric card for requests that had just
+    made up to seven paid LLM calls, and the `cost_calc` span carried
+    `llm.prompt_tokens: 0`, `llm.completion_tokens: 0`, `llm.cost_usd: 0` into
+    SigNoz.
+
+    The real per-call cost was always recorded correctly inside `_call_llm` ->
+    `record_llm_observability`, so the aggregate counters were right while the
+    per-request span and the API response said zero — two sources disagreeing,
+    with the one a human reads being the wrong one.
+
+    Cost is computed at the call site (`ai_agent._call_cost`) because that is the
+    only place the prompt/completion split exists, and the two are priced
+    differently — a total-token figure cannot be converted to cost after the fact.
+    """
+    agents = _agents_of(result)
+    cost = _sum_cost(*agents)
+    tokens = _sum_tokens(*agents)
+    model_id = str(getattr(getattr(result, "scan", None), "model_used", None) or "unknown")
+
     span.set_attribute("llm.model_id", model_id)
-    span.set_attribute("llm.prompt_tokens", pt)
-    span.set_attribute("llm.completion_tokens", ct)
-    span.set_attribute("llm.cost_usd", cost)
-    if telemetry.COST_PER_REQUEST_USD is not None:
+    span.set_attribute("llm.usage_reported", tokens is not None)
+    if tokens is not None:
+        span.set_attribute("llm.total_tokens", tokens)
+    if cost is not None:
+        span.set_attribute("llm.cost_usd", cost)
+
+    if cost is not None and telemetry.COST_PER_REQUEST_USD is not None:
         telemetry.COST_PER_REQUEST_USD.record(cost, {"model": model_id})
-    if telemetry.TOKENS_TOTAL is not None:
-        telemetry.TOKENS_TOTAL.add(pt + ct, {"model": model_id})
+    if tokens is not None and telemetry.TOKENS_TOTAL is not None:
+        telemetry.TOKENS_TOTAL.add(tokens, {"model": model_id})
     return cost
 
 
-def _emit_request_metrics(result: ScanResult, latency_s: float, cache_hit: bool) -> None:
+def _emit_request_metrics(result, latency_s: float, cache_hit: bool) -> None:
+    """Latency always; throughput only when the tokens are actually known.
+
+    `total_tokens` was read from `prompt_tokens`/`completion_tokens`, which a
+    `PipelineResult` does not have, so it was always 0 and the
+    `if total_tokens and ...` guard never passed — the
+    `devguard.llm.tokens_per_sec` histogram documented in `telemetry.py` has
+    never received a single observation.
+    """
     if telemetry.REQUEST_LATENCY_MS is not None:
         telemetry.REQUEST_LATENCY_MS.record(latency_s * 1000, {"cache_hit": str(cache_hit)})
-    total_tokens = int(getattr(result, "prompt_tokens", 0) or 0) + int(
-        getattr(result, "completion_tokens", 0) or 0
-    )
+
+    total_tokens = _sum_tokens(*_agents_of(result))
     if total_tokens and latency_s > 0 and telemetry.TOKENS_PER_SEC is not None:
         telemetry.TOKENS_PER_SEC.record(total_tokens / latency_s)
 
