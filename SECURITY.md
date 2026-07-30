@@ -25,7 +25,19 @@ Only `main`. There are no released versions and no backported fixes.
   the application, so a reviewer never has to supply one to inspect it.
 - **Tamper-evident audit trail.** Every scan appends a hash-chained record
   (`backend/core/audit.py`); `GET /audit-log/verify` re-verifies the chain and
-  reports the first break if there is one.
+  reports the first break if there is one. The record carries the pipeline's
+  real decision — `pass`, `fail`, `no_findings` or `unvalidated`. Until recently
+  it did not: the verdict was read off a field `PipelineResult` does not have, so
+  **all 35 entries committed in this repository record `"unknown"`**. Those
+  entries are deliberately not rewritten; editing a hash-chained audit log to
+  look better is the act the chain exists to detect.
+- **Human-in-the-loop approval gate.** Critical and high severity findings pause
+  for an explicit `/approve` or `/reject` before the audit entry is written. The
+  gate reads the Scanner's finding, not the request, so a caller cannot supply a
+  low severity to bypass review — and an unrecognised severity gates rather than
+  passing. This control **never fired before**: it read `severity` off
+  `ScanRequest`, which has only `code` and `language`, so every scan
+  auto-finalized. Asserted by `tests/test_approval_gate.py`.
 - **Bounded agent loop.** Reflection retries are capped
   (`MAX_REFLECTION_RETRIES`); a circuit breaker (`backend/core/resilience.py`)
   opens on repeated upstream failure rather than retrying without limit.
@@ -37,7 +49,7 @@ Only `main`. There are no released versions and no backported fixes.
 
 ## What is regression-protected
 
-238 tests run on every push in CI, with no API key, no collector and no network
+263 tests run on every push in CI, with no API key, no collector and no network
 (`.github/workflows/ci.yml`). They cover the typed agent boundaries, the audit
 chain's tamper detection, the circuit-breaker state machine, telemetry
 fail-safety, the untrusted-content boundary above, and the `/scan` response

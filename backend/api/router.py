@@ -505,7 +505,10 @@ async def scan(request: Request, x_traceparent: Optional[str] = Header(default=N
     with tracer.start_as_current_span("scan_request", context=ctx) as parent:
         trace_id = format_trace_id(parent.get_span_context().trace_id)
         parent.set_attribute("scan.id", scan_id)
-        parent.set_attribute("scan.severity", getattr(scan_req, "severity", "unknown"))
+        # Severity is a FINDING, not a request field — ScanRequest has only
+        # `code` and `language`. This attribute used to read a field that does
+        # not exist and stamped "unknown" on every trace. It is set after the
+        # scan instead, where the value is actually known.
 
         started = time.perf_counter()
         try:
@@ -579,7 +582,7 @@ async def scan(request: Request, x_traceparent: Optional[str] = Header(default=N
 
 
 async def _finalize_or_gate(
-    scan_id: str, req: ScanRequest, result: ScanResult, trace_id: str,
+    scan_id: str, req: ScanRequest, result, trace_id: str,
     latency_s: float = 0.0, cached_hit: bool = False, cost: Optional[float] = None,
 ) -> dict[str, Any]:
     """
@@ -597,10 +600,10 @@ async def _finalize_or_gate(
     it costs the request nothing measurable and makes the reported chain state
     true.
     """
-    severity = str(getattr(req, "severity", "")).lower()
-    verdict = str(getattr(result, "verdict", "unknown"))
+    severity = _gating_severity(result)
+    verdict = _verdict_of(result)
     score = _extract_score(result)
-    gated = severity in ("critical", "high")
+    gated = severity in GATED_SEVERITIES
 
     # Critical/high pause at the gate, so no entry is written yet -> the chain
     # state is reported as "pending" until /approve or /reject writes one.
@@ -615,6 +618,13 @@ async def _finalize_or_gate(
             )
             telemetry.add_span_event("audit.append_failed", {"scan.id": scan_id})
             finalized_entry = AUDIT_APPEND_FAILED
+
+    # Severity is known now that the scan has run — stamp it on the trace here,
+    # where it is a measurement rather than an absent request field.
+    telemetry.add_span_event(
+        "scan.severity_determined",
+        {"scan.id": scan_id, "scan.severity": severity or "none", "scan.gated": gated},
+    )
 
     frontend_result = _build_frontend_result(
         scan_id, req, result, trace_id, latency_s * 1000, cost,
@@ -672,7 +682,104 @@ async def _finalize_or_gate(
     }
 
 
-async def _finalize(scan_id: str, req: ScanRequest, result: ScanResult) -> dict[str, Any]:
+#: Finding severities that require a human decision before the fix is finalized.
+GATED_SEVERITIES = ("critical", "high")
+
+#: Ordering for "worst finding in the batch".
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _gating_severity(result) -> Optional[str]:
+    """The worst severity the Scanner reported, or None if it found nothing.
+
+    THIS IS WHAT DECIDES WHETHER A HUMAN REVIEWS THE FIX, and it used to read a
+    field that does not exist:
+
+        severity = str(getattr(req, "severity", "")).lower()
+        gated = severity in ("critical", "high")
+
+    `req` is a `ScanRequest`, whose fields are exactly `['code', 'language']` —
+    there is no `severity`. Pydantic drops the extra key if a caller supplies
+    one, so `getattr` returned `""` every time and `gated` was permanently
+    `False`. **The human-in-the-loop approval gate never opened.** Every scan
+    auto-finalized, critical ones included; `POST /scan/{id}/approve` and
+    `/reject` were unreachable, and the `pending_approval` status was never
+    emitted.
+
+    The design was wrong twice over. Even with the field present, the *request*
+    cannot know the severity — nothing has scanned the code when it arrives.
+    Severity is a finding, not an input, and the pipeline already computes this
+    exact value to route the Fixer's model.
+
+    Reading it from the scan also closes a bypass: a client cannot send
+    `severity: "low"` to talk the gate out of opening on a critical finding.
+    """
+    scan = getattr(result, "scan", None)
+    vulns = getattr(scan, "vulnerabilities", None) or []
+    worst: Optional[str] = None
+    for v in vulns:
+        sev = getattr(getattr(v, "severity", None), "value", None) or str(
+            getattr(v, "severity", "")
+        ).replace("Severity.", "").lower()
+        if sev not in _SEVERITY_RANK:
+            # An unrecognised severity must not silently rank as harmless. Gate
+            # on it: a human looking at one extra fix is a far cheaper mistake
+            # than an unreviewed critical patch shipping itself.
+            logger.warning(
+                "Unrecognised finding severity %r; treating it as gated so it "
+                "cannot skip human review.", sev,
+            )
+            return "critical"
+        if worst is None or _SEVERITY_RANK[sev] > _SEVERITY_RANK[worst]:
+            worst = sev
+    return worst
+
+
+def _verdict_of(result) -> str:
+    """The pipeline's decision, as the audit trail should record it.
+
+    THIS IS THE AUDIT TRAIL'S ONE SUBSTANTIVE FIELD, and it was never written.
+    Both this and the `/scan` response used:
+
+        str(getattr(result, "verdict", "unknown"))
+
+    `result` is a `PipelineResult`, which has no `verdict` field — the verdict
+    lives at `final_validation.verdict`. So the `getattr` default won every
+    time. Measured against the log committed in this repository: **35 of 35
+    entries recorded the literal string "unknown"**. A cryptographically sound,
+    tamper-evident chain of records that say nothing.
+
+    Four distinguishable outcomes, because collapsing them is how the defect
+    stayed invisible:
+
+      pass / fail   the Validator's actual judgement
+      no_findings   the Scanner reported nothing, so no Fixer and no Validator
+                    ran. Recording "pass" here would claim a Validator judgement
+                    that never happened (LAW 3).
+      unvalidated   there were findings but no final validation — retries
+                    exhausted, or the loop ended without a verdict. A real state,
+                    and distinct from "the read failed", which is what "unknown"
+                    now means and nothing else.
+
+    `Verdict` subclasses `str`, so `str(Verdict.PASS)` yields "Verdict.PASS".
+    `.value` is used deliberately: a record reading "Verdict.PASS" is
+    machine-hostile and betrays that the value was stringified rather than read.
+    """
+    validation = getattr(result, "final_validation", None)
+    if validation is not None:
+        verdict = getattr(validation, "verdict", None)
+        if verdict is not None:
+            return getattr(verdict, "value", None) or str(verdict)
+
+    scan = getattr(result, "scan", None)
+    if scan is not None and not getattr(scan, "vulnerabilities", None):
+        return "no_findings"
+    if scan is not None:
+        return "unvalidated"
+    return "unknown"
+
+
+async def _finalize(scan_id: str, req: ScanRequest, result) -> dict[str, Any]:
     """Write the immutable audit entry (Feature #8) and return the record written.
 
     Returning it lets the caller report the real prev_hash/entry_hash instead of
@@ -681,7 +788,7 @@ async def _finalize(scan_id: str, req: ScanRequest, result: ScanResult) -> dict[
     """
     code_hash = telemetry._sha256(getattr(req, "code", ""))
     return await audit.append_entry(
-        scan_id=scan_id, code_hash=code_hash, verdict=str(getattr(result, "verdict", "unknown"))
+        scan_id=scan_id, code_hash=code_hash, verdict=_verdict_of(result)
     )
 
 
@@ -725,7 +832,11 @@ async def approve(scan_id: str):
         scan_id, {"type": "done", "scan_id": scan_id, "score": score}
     )
     _pending_approvals.pop(scan_id, None)
-    return {"scan_id": scan_id, "status": "approved", "verdict": str(getattr(entry["result"], "verdict", "unknown"))}
+    return {
+        "scan_id": scan_id,
+        "status": "approved",
+        "verdict": _verdict_of(entry["result"]),
+    }
 
 
 @router.post("/scan/{scan_id}/reject")
@@ -936,7 +1047,7 @@ def _emit_request_metrics(result, latency_s: float, cache_hit: bool) -> None:
         telemetry.TOKENS_PER_SEC.record(total_tokens / latency_s)
 
 
-def _extract_score(result: ScanResult) -> float:
+def _extract_score(result) -> float:
     """Best-effort extraction of a 0-100 validator score from whatever shape
     `result` actually has."""
     for attr in ("eval_score", "score", "validator_score"):
@@ -951,7 +1062,7 @@ def _extract_score(result: ScanResult) -> float:
     return 0.0
 
 
-def _dump(result: ScanResult) -> dict[str, Any]:
+def _dump(result) -> dict[str, Any]:
     try:
         return result.model_dump()
     except AttributeError:

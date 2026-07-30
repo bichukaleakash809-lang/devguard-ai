@@ -1,0 +1,75 @@
+============================================================================
+DEFECT 1 — THE HUMAN-IN-THE-LOOP APPROVAL GATE NEVER OPENED
+============================================================================
+
+README: '**Human-in-the-loop approval gate** for critical/high severity fixes'
+
+The gate decision was:
+    severity = str(getattr(req, "severity", "")).lower()
+    gated = severity in ("critical", "high")
+
+  ScanRequest.model_fields = ['code', 'language']
+  ScanRequest(code=..., severity='critical') -> getattr(r,'severity','') == ''
+
+  There is no `severity` field. Pydantic drops the extra key, so getattr
+  returned '' EVERY time and `gated` was permanently False.
+
+  Consequence: every scan auto-finalized, critical ones included.
+  POST /scan/{id}/approve and /reject were unreachable dead code, and the
+  'pending_approval' status was never emitted. The safety control that
+  stops an unreviewed critical security fix from being applied did not run.
+
+  The design was wrong twice over: even with the field present, the REQUEST
+  cannot know the severity — nothing has scanned the code when it arrives.
+
+AFTER — the gate reads the Scanner's finding:
+
+  findings                                severity              status
+  one low                                      low           completed
+  one medium                                medium           completed
+  one high                                    high    pending_approval
+  one critical                            critical    pending_approval
+  low + critical + medium                 critical    pending_approval
+  nothing found                               None           completed
+
+  the worst finding decides, not the first — and nothing found means
+  nothing to approve.
+
+  client sends severity='low' with a CRITICAL finding -> pending_approval
+  -> a caller cannot talk the gate out of opening. Reading the scan closes
+     a bypass that reading the request left open.
+
+============================================================================
+DEFECT 2 — THE AUDIT TRAIL RECORDED 'unknown' FOR EVERY SCAN
+============================================================================
+
+SECURITY.md: 'Tamper-evident audit trail. Every scan appends a hash-chained
+record.' True — but the record's one substantive field was never written:
+
+    verdict=str(getattr(result, "verdict", "unknown"))
+
+  'verdict' in PipelineResult.model_fields: False
+  The verdict lives at final_validation.verdict, so the default won.
+
+MEASURED against the log committed in this repository:
+    entries: 35
+      verdict='unknown': 35
+
+  35 of 35. A cryptographically sound, tamper-evident chain of records
+  that say nothing. Those entries are NOT rewritten — they honestly record
+  what the system knew, and editing a hash-chained audit log to look better
+  is precisely the act the chain exists to detect.
+
+AFTER — four distinguishable outcomes:
+
+  Validator passed           -> verdict='pass'
+  Validator failed           -> verdict='fail'
+  Scanner found nothing      -> verdict='no_findings'
+  findings, no validation    -> verdict='unvalidated'
+
+  'unknown' now means one thing only: the read failed. It is no longer
+  indistinguishable from 'the Scanner found nothing'.
+
+  chain across mixed verdicts: valid=True, entries=4
+
+ALL ASSERTIONS PASSED

@@ -28,8 +28,8 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract, the resilience degradation path and the scan cache all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
-| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 238, contract and regression tests throughout. |
+| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed** (failed open on casing variance), **the human-in-the-loop approval gate fixed** (never opened at all), **the audit trail now records a real verdict** (35/35 entries said `unknown`). Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
+| 6 | Test coverage | 58 → 263, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 238 passing**, all with no API key, no collector, no network.
+**Test inventory — 263 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -260,6 +260,12 @@ false-negative risk is real and stated.
   wrong-shaped entry stays a miss, and hit/miss counters match reality
 - `test_cost_accounting.py` (13) — per-request cost is summed from real agent
   spend, `tokens_per_sec` actually fires, and a cache hit is not billed twice
+- `test_approval_gate.py` (14) — critical/high pause for a human, low/medium and
+  clean scans do not, a client-supplied severity cannot bypass the gate, and the
+  gate/approve/reject cycle leaves a verifiable chain
+- `test_audit_verdict.py` (11) — the audit record carries the real verdict, the
+  four outcomes stay distinguishable, and tampering with a recorded verdict is
+  detected
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -519,6 +525,72 @@ missing `created_at` is never discarded — no pending human decision is thrown
 away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
+
+### The human-in-the-loop approval gate never opened, and the audit log recorded nothing
+
+The two most serious findings of the session, both the same root cause as the
+cache and cost defects, and both found by systematically grepping for the pattern
+rather than stumbling on them: `getattr(x, "field", default)` where `field`
+cannot exist on `x`.
+
+**1. The approval gate never opened. Not once.** README, Core Features:
+*"Human-in-the-loop approval gate for critical/high severity fixes."*
+
+```python
+severity = str(getattr(req, "severity", "")).lower()
+gated = severity in ("critical", "high")
+```
+
+`ScanRequest.model_fields` is exactly `['code', 'language']` — **there is no
+`severity` field.** Pydantic drops the extra key if a caller sends one, so
+`getattr` returned `""` every time and `gated` was permanently `False`. Every
+scan auto-finalized, critical ones included. `POST /scan/{id}/approve` and
+`/reject` were unreachable dead code and `pending_approval` was never emitted.
+The safety control that stops an unreviewed critical security fix from being
+applied has never run.
+
+The design was wrong twice over: even with the field present, the *request*
+cannot know the severity — nothing has scanned the code when it arrives. Severity
+is a finding, and the pipeline already computes exactly this value to route the
+Fixer's model. Reading the scan also closes a **bypass**: a client sending
+`severity: "low"` can no longer talk the gate out of opening on a critical
+finding. An unrecognised severity now gates rather than passing — a human looking
+at one extra fix is a far cheaper mistake than an unreviewed critical patch
+shipping itself.
+
+**2. The audit trail recorded `"unknown"` for every scan.** SECURITY.md:
+*"Tamper-evident audit trail. Every scan appends a hash-chained record."* All
+true — the chain is real and 37 tests demonstrate its tamper detection. But the
+record's one substantive field was never written:
+
+```python
+verdict=str(getattr(result, "verdict", "unknown"))
+```
+
+`PipelineResult` has no `verdict`; it lives at `final_validation.verdict`.
+Measured against the log committed in this repository:
+
+```
+entries: 35
+  verdict='unknown': 35
+```
+
+**35 of 35.** A cryptographically sound, tamper-evident chain of records that say
+nothing. The same expression fed the `verdict` field of every `/scan` response
+and of `/approve`.
+
+Four distinguishable outcomes now — `pass` / `fail` from the Validator,
+`no_findings` when the Scanner reported nothing (recording "pass" there would
+claim a judgement that never happened, LAW 3), and `unvalidated` when there were
+findings but no final validation. `"unknown"` now means one thing only: the read
+failed.
+
+**The 35 existing entries are NOT rewritten.** They honestly record what the
+system knew when it wrote them, and editing a hash-chained audit log to look
+better is precisely the act the chain exists to detect.
+
+Evidence: `docs/audit-evidence/t2/approval-gate-and-verdict-defect.txt`.
+**Tests 238 → 263.**
 
 ### Per-request cost was always $0.00, and a documented metric had never fired
 
@@ -861,7 +933,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 238 passed
+pytest tests/                                -> 263 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -887,7 +959,8 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
 `live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`,
-`python-dependency-advisories.txt`, `cache-round-trip-defect.txt`, `cost-accounting-defect.txt`.
+`python-dependency-advisories.txt`, `cache-round-trip-defect.txt`, `cost-accounting-defect.txt`,
+`approval-gate-and-verdict-defect.txt`.
 
 ---
 
@@ -898,7 +971,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 238 passed
+python -m pytest tests/          # expect 263 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -971,13 +1044,16 @@ Blocking first:
 - Do not claim a capability in a commit message before implementing it. This
   happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
   `f3bb8e5`.
-- **A wrong type annotation is a defect report.** Four separate bugs in this
+- **A wrong type annotation is a defect report.** SIX separate bugs in this
   session came from functions annotated `result: ScanResult` that are handed a
   `PipelineResult`, reading fields that do not exist and silently getting
-  `getattr` defaults — cost 0.0, tokens 0, model `__default__`, an unreadable
-  cache. `getattr(x, "field", default)` on a typed object hides exactly this.
-  When you see a defensive `getattr` with a default, check whether the attribute
-  can ever be present.
+  `getattr` defaults: cost 0.0, tokens 0, model `__default__`, an unreadable
+  cache, an audit verdict of `"unknown"`, and an approval gate that never opened.
+  `getattr(x, "field", default)` on a typed object hides exactly this. **After
+  fixing the first two, grepping the file for the pattern found the other four in
+  minutes** — the sweep is worth more than the individual fixes. When you see a
+  defensive `getattr` with a default, check whether the attribute can ever be
+  present.
 - **Fixing a dead code path makes new code reachable — audit it before shipping.**
   The cache had never hit, so everything downstream of a cache hit had never run.
   The cost double-count was found by going looking for that, not by accident.
@@ -1011,4 +1087,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `4503994` + this update. CI green on runs 21-28, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `b3655a0` + this update. CI green on runs 21-28, all four jobs.*
