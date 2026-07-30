@@ -15,7 +15,23 @@ opentelemetry-exporter-otlp==1.20.0
 # install. Pinned to the 0.41b0 line that matches opentelemetry-* 1.20.0.
 opentelemetry-instrumentation-fastapi==0.41b0
 opentelemetry-instrumentation-logging==0.41b0
-aiohttp==3.9.1
+# aiohttp is NOT pinned here on purpose, and NOT because it is absent.
+#
+# It used to read `aiohttp==3.9.1`, and that one line carried 30 of the 56
+# advisories `pip-audit` reports against this file. Nothing in DevGuard imports
+# aiohttp — `grep -rn aiohttp --include=*.py` finds no import, and it is absent
+# from `sys.modules` after `import backend.main`. But it is not removable either,
+# because it arrives transitively:
+#
+#     chromadb -> kubernetes -> aiohttp<4.0.0,>=3.9.0
+#
+# So a direct pin could not remove the package; all it did was hold a dependency
+# we never call at the *oldest* version that satisfied that range. Dropping the
+# pin lets the resolver satisfy kubernetes's own constraint, which it does with
+# 3.14.3 — above every fix version in the advisory list.
+#
+# If chromadb is ever cut (docs/HANDOFF.md open issue 4), kubernetes and aiohttp
+# leave with it and this comment can go too.
 websockets==12.0
 httpx==0.25.2
 

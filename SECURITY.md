@@ -140,15 +140,16 @@ go red again on any upstream publication against a pinned version — a failure
 with no code change behind it. **Do not read a green tick on that job as "no
 advisories" — read the report.**
 
-### Python dependency advisories — 56 across 7 packages, all currently unreachable
+### Python dependency advisories — 56 → 18, and the rest triaged
 
-`requirements.txt` had never been audited. `pip-audit` reports **56 known
-vulnerabilities in 7 packages**. Triaged per advisory against this codebase
-rather than reported as a count:
+`requirements.txt` had never been audited. `pip-audit` reported **56 known
+vulnerabilities in 7 packages**. **Now 18 in 6**, after removing a redundant
+`aiohttp==3.9.1` pin with owner approval — see below. Triaged per advisory against
+this codebase rather than reported as a count:
 
 | Package | Pinned | Advisories | Reachable here? |
 |---|---|---|---|
-| `aiohttp` | 3.9.1 | 30 | **No** — pinned directly, never imported by the running app |
+| ~~`aiohttp`~~ | *unpinned* | ~~30~~ **0** | **Fixed.** The pin could never have removed the package — it arrives transitively via `chromadb → kubernetes → aiohttp<4.0.0,>=3.9.0`. All the pin did was hold a dependency nothing imports at the *oldest* version in that range. Dropping it lets the resolver pick **3.14.3**, above every fix version. Evidence: `docs/audit-evidence/t2/dep-step1-aiohttp.txt` |
 | `starlette` | 0.27.0 | 7 unique | **No** — see below; the one package genuinely in the request path |
 | `transformers` | 4.57.6 | 5 | **No** — arrives via `sentence-transformers`, which is itself unimportable |
 | `fastapi` | 0.104.1 | 1 | **No** — the `python-multipart` ReDoS; that package is not installed |

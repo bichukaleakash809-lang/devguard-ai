@@ -1,0 +1,66 @@
+STEP 1 OF APPROVED DEPENDENCY MAINTENANCE — aiohttp
+===================================================
+
+CORRECTING MY OWN EARLIER FRAMING. I recommended this as "drop aiohttp,
+nothing imports it". The first half is right, the second is incomplete:
+aiohttp is NOT removable, because it arrives transitively.
+
+  $ pip show aiohttp | grep Required-by
+    Required-by: kubernetes
+  $ pip show kubernetes | grep Required-by
+    Required-by: chromadb
+  kubernetes's own constraint:  aiohttp<4.0.0,>=3.9.0
+
+  chain:  chromadb -> kubernetes -> aiohttp
+
+So the direct pin `aiohttp==3.9.1` could never have removed the package.
+What it actually did was hold a dependency we never call at the OLDEST
+version satisfying kubernetes's range — which is why it carried 30 of the
+56 advisories against this file.
+
+PROOF IT IS UNUSED BY DEVGUARD
+------------------------------
+  $ grep -rn aiohttp --include=*.py .    -> no import anywhere
+  sys.modules after 'import backend.main' -> aiohttp absent
+  chromadb itself is unimportable:
+    AttributeError: `np.float_` was removed in the NumPy 2.0 release.
+  so nothing in the running application can reach it.
+
+THE CHANGE — one line deleted, plus the comment explaining why
+--------------------------------------------------------------
+  -aiohttp==3.9.1
+
+Dropping the pin lets the resolver satisfy kubernetes's constraint itself.
+Verified by resolution, not assumed:
+
+    pip install --dry-run picks: aiohttp-3.14.3
+    (latest 3.x is 3.14.3; above every fix version in the advisory list)
+
+BEHAVIOUR — identical
+---------------------
+  tests, aiohttp 3.9.1  -> 301 passed
+  tests, aiohttp 3.14.3 -> 301 passed
+  import backend.main with GROQ_API_KEY unset -> OK
+  scripts/verify_otel.py                      -> exit 0 (PASSED)
+  scripts/doctor.py                           -> exit 0
+
+ADVISORY COUNT — measured before and after
+------------------------------------------
+  before:  Found 56 known vulnerabilities in 7 packages
+  after:   Found 18 known vulnerabilities in 6 packages
+
+  package           before   after
+  aiohttp               38       0
+  fastapi                1       1
+  protobuf               1       1
+  pytest                 1       1
+  python-dotenv          1       1
+  starlette              9       9
+  transformers           5       5
+
+  aiohttp: 30 unique advisories (38 report lines incl. duplicates) -> 0.
+  Nothing else moved, which is what "smallest possible modification" means.
+
+REMAINING, and deliberately untouched by this step:
+  starlette 9   <- step 2 of the approved sequence
+  transformers 5, fastapi 1, protobuf 1, python-dotenv 1, pytest 1
