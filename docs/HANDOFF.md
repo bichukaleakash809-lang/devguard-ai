@@ -99,6 +99,7 @@ Any deployment whose collector went away would have hung on restart or redeploy.
 | `cda9d78` | Docs accuracy: removed statements no longer true; DEPLOYMENT.md status banner |
 | `9716701` | **RAG: fixed non-deterministic retrieval + found both heavy backends are dead** |
 | `0a7341d` | **Pipeline: clean-code short-circuit; removed fake SigNoz log claims** |
+| `7678d26` | **Benchmark: a failed scan is no longer reported as a clean scan** |
 
 ### Pipeline — two real defects (commit `0a7341d`)
 
@@ -121,7 +122,20 @@ the real source; a test guards the string from returning.
 Evidence: `docs/audit-evidence/t2/pipeline-defects.txt` (includes the pre-fix
 failing test output).
 
-**Tests now 94.** CI run #5 on `0ab21d2` = `success` (all three jobs).
+### Benchmark — measurement defect (commit `7678d26`)
+
+`except AgentExecutionError: found = set()` recorded a **failed** scan
+identically to one that correctly **found nothing**. So a run during an API
+outage published itself as poor recall with nothing saying the run was degraded —
+and that is the only number in the repo that could ever be published as accuracy
+(LAW 6). Measured with 3 of 14 snippets forced to raise: recall 0.7692, and
+before the fix that was indistinguishable from genuinely missing three
+vulnerabilities. `BenchmarkReport.errored_snippets` (default 0, backward
+compatible) plus per-snippet `errored` now make it visible; the negative control
+`clean_parameterized` correctly stays `errored=0`.
+Evidence: `docs/audit-evidence/t2/benchmark-defect.txt`
+
+**Tests now 102.** CI green on runs 6, 8, 9 and 11 (runs 7 and 10 were cancelled by rapid follow-up pushes, not failures).
 
 ### RAG — two real defects (commit `9716701`)
 
@@ -171,7 +185,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 94 passing**, all with no API key, no collector, no network:
+**Test inventory — 102 passing**, all with no API key, no collector, no network:
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
   bounded `eval_score`/`confidence_score`, enum rejection, minimum reasoning
   length, no raw dicts across boundaries, empty code rejected before any LLM call
@@ -190,6 +204,8 @@ false-negative risk is real and stated.
 - `test_pipeline_loop.py` (11) — the reflection loop: convergence, retry with
   feedback threaded, exhaustion, both gate conditions independently, the `>=`
   boundary, and the clean-code short-circuit
+- `test_benchmark_harness.py` (8) — errored vs clean scans, partial outage
+  visibility, FP counting, metric bounds, negative control preserved
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
