@@ -43,7 +43,7 @@ from typing import Optional
 import redis.asyncio as redis
 
 from backend.core import telemetry
-from backend.core.schemas import ScanRequest, ScanResult
+from backend.core.schemas import PipelineResult, ScanRequest, ScanResult  # noqa: F401
 
 logger = logging.getLogger("devguard.cache")
 
@@ -90,10 +90,36 @@ def cache_key(request: ScanRequest) -> str:
     return f"devguard:scan:{SCAN_POLICY_VERSION}:{digest}"
 
 
-async def get_cached(request: ScanRequest) -> Optional[ScanResult]:
+async def get_cached(request: ScanRequest) -> Optional[PipelineResult]:
     """
-    Return a cached ScanResult or None. Records hit/miss as BOTH a span attribute
-    and a counter metric (Feature #9).
+    Return a cached PipelineResult or None. Records hit/miss as BOTH a span
+    attribute and a counter metric (Feature #9).
+
+    THE TYPE HERE IS LOAD-BEARING, and it used to be wrong. `POST /scan` writes
+    whatever `run_pipeline_resilient` returns — a **PipelineResult** — and this
+    function deserialized with `ScanResult(**json.loads(raw))`. A PipelineResult
+    dump has no top-level `model_used` (it lives at `scan.model_used`) and that
+    field is required on ScanResult, so every single read raised
+    ValidationError, was swallowed by the broad `except`, and was logged as
+    "Corrupt cache entry ...; re-running."
+
+    Two consequences, both silent:
+
+      * **The cache never hit. Not once.** Feature #9 was 100% miss for its
+        entire existence, and the log blamed data corruption rather than a
+        writer/reader type mismatch — so it read as a Redis problem forever.
+
+      * **A hit would have been a false negative.** The router hands this object
+        straight to `_build_frontend_result`, which reads
+        `getattr(pipeline, "scan", None)`. A ScanResult has no `.scan`, so that
+        is None and the response reports ZERO vulnerabilities — a vulnerable file
+        rendered clean, with a green UI. For a security scanner that is the worst
+        failure direction available, and it was one successful deserialization
+        away.
+
+    Validation on read is what keeps a wrong-shaped entry a miss instead of an
+    empty scan result, so the `except` below is a real safety net rather than a
+    permanent state.
     """
     span = telemetry.trace.get_current_span()
     key = cache_key(request)
@@ -114,26 +140,35 @@ async def get_cached(request: ScanRequest) -> Optional[ScanResult]:
         _record_miss(span, reason="not_found")
         return None
 
-    _record_hit(span)
     try:
-        return ScanResult(**json.loads(raw))
+        result = PipelineResult(**json.loads(raw))
     except Exception as exc:  # noqa: BLE001
-        # Corrupt entry — treat as miss and let the pipeline overwrite it.
-        logger.warning("Corrupt cache entry for %s (%s); re-running.", key, exc)
+        # Corrupt or wrong-shaped entry — treat as a miss and let the pipeline
+        # overwrite it. Counted as a miss, NOT as a hit: an entry we could not
+        # read is not a hit, and counting it as one made the hit-rate metric
+        # report the exact opposite of the truth.
+        logger.warning("Unreadable cache entry for %s (%s); re-running.", key, exc)
         _record_miss(span, reason="corrupt")
         return None
 
+    _record_hit(span)
+    return result
 
-async def set_cached(request: ScanRequest, result: ScanResult) -> None:
-    """Persist a result. Best-effort; a write failure never fails the request."""
+
+async def set_cached(request: ScanRequest, result: PipelineResult) -> None:
+    """Persist a result. Best-effort; a write failure never fails the request.
+
+    Writes the same type `get_cached` reads. The asymmetry between this function
+    and its reader is what made the cache permanently non-functional.
+    """
     if _client is None:
         return
     key = cache_key(request)
     try:
         # model_dump for pydantic v2; fall back to dict() for v1.
         try:
-            body = result.model_dump()
-        except AttributeError:
+            body = result.model_dump(mode="json")
+        except (AttributeError, TypeError):
             body = result.dict()
         await _client.set(key, json.dumps(body, default=str), ex=CACHE_TTL_S)
     except Exception as exc:  # noqa: BLE001

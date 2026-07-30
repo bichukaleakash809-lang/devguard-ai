@@ -1,0 +1,84 @@
+============================================================================
+THE SCAN CACHE COULD NEVER READ BACK WHAT IT WROTE
+============================================================================
+
+POST /scan writes:  cache.set_cached(scan_req, result)
+                    where `result` is run_pipeline_resilient's PipelineResult
+POST /scan reads:   cache.get_cached(scan_req)
+
+The reader deserialized with `ScanResult(**json.loads(raw))`.
+
+what was written (top-level keys of the stored JSON):
+    ['converged', 'final_fix', 'final_validation', 'original_code', 'reflection_history', 'routing_decisions', 'scan', 'self_observation']
+
+what the OLD reader required:
+     ScanResult.model_used  -> a REQUIRED field, absent at the top level
+     (it lives nested at scan.model_used)
+
+so every read raised, verbatim from the run that proved this:
+     1 validation error for ScanResult
+     model_used
+       Field required [type=missing, ...]
+   ...and was swallowed and logged as "Corrupt cache entry ...; re-running."
+
+CONSEQUENCE 1 — the cache never hit. Not once. Feature #9 was 100% miss for
+its entire existence, and the log blamed data corruption rather than a
+writer/reader type mismatch, so it read as a Redis problem forever.
+
+CONSEQUENCE 2 — a hit would have been a FALSE NEGATIVE. Demonstrated:
+
+  a ScanResult fed to _build_frontend_result (it reads pipeline.scan):
+    vulnerabilities reported: []
+    severity_before:          None
+    -> a CRITICAL SQL injection rendered as a clean file, green UI.
+       One successful deserialization away.
+
+============================================================================
+AFTER — symmetric types, validated on read
+============================================================================
+
+  get_cached returns:  PipelineResult
+  vulnerabilities:     1  (cwe=CWE-89)
+  severity_before:     critical
+  eval_score:          92
+  tokens_used:         2632
+  -> byte-identical to a fresh scan's response. The builder cannot tell.
+
+A wrong-shaped entry is STILL a miss (the safety net stays):
+Unreadable cache entry for devguard:scan:v1:acdb13225b6e7a975dd2ef17353904f1cf5b0d9db7e3484e434f958e200e18cb (3 validation errors for PipelineResult
+original_code
+  Field required [type=missing, input_value={'vulnerabilities': [], '...lama-3.3-70b-versatile'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.5/v/missing
+scan
+  Field required [type=missing, input_value={'vulnerabilities': [], '...lama-3.3-70b-versatile'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.5/v/missing
+converged
+  Field required [type=missing, input_value={'vulnerabilities': [], '...lama-3.3-70b-versatile'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.5/v/missing); re-running.
+  a bare ScanResult payload -> None (miss), not an empty scan result
+
+SECOND DEFECT, found while fixing the first:
+  _record_hit(span) fired BEFORE deserialization. Since deserialization
+  always failed, every request incremented the HIT counter and then the
+  MISS counter — devguard.cache.hit_total reported a healthy hit rate for
+  a cache returning None every time. The metric said the opposite of the
+  truth, on the dashboard built to watch it. Hit is now recorded only
+  after a successful parse.
+
+ALL ASSERTIONS PASSED
+
+============================================================================
+VERIFIED AGAINST A REAL REDIS (redis-server on :6399, not a fake)
+============================================================================
+
+  init_cache() -> connected
+  cold read (nothing stored):  None
+  set_cached(PipelineResult)   -> written to Redis
+  warm read:                   PipelineResult
+    vulnerabilities:           1 (CWE-89, critical)
+    eval_score:                92
+    tokens summed by router:   2632
+    TTL on the stored key:     86400s (CACHE_TTL_S=86400)
+  policy bump v1 -> v2:        miss (stale ruleset never served)
+
+REAL-REDIS ROUND TRIP CONFIRMED

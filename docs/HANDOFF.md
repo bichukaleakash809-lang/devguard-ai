@@ -25,11 +25,11 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | # | Priority | Status |
 |---|---|---|
 | 1 | Performance | Four real problems found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`); `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`); unbounded in-memory scan state, 53.4 KiB leaked per scan → 26 MiB flat; `GET /audit-log/verify` blocking the event loop for 354 ms at 50k entries → off-thread. RAG retrieval measured and found NOT to be a bottleneck (0.16–2.1 ms) — recorded as a negative result. |
-| 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract and the resilience degradation path all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
+| 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract, the resilience degradation path and the scan cache all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 209, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 225, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 209 passing**, all with no API key, no collector, no network.
+**Test inventory — 225 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -256,6 +256,8 @@ false-negative risk is real and stated.
 - `test_endpoint_event_loop.py` (5) — measures loop starvation directly, so a
   handler that reintroduces synchronous file I/O fails rather than just getting
   slower
+- `test_cache_round_trip.py` (16) — the cache reads back what it writes, a
+  wrong-shaped entry stays a miss, and hit/miss counters match reality
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -516,6 +518,60 @@ away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
 
+### The scan cache could never read back what it wrote
+
+The largest functional defect found so far, and it was invisible because its own
+error message misdirected.
+
+`POST /scan` writes `cache.set_cached(scan_req, result)` where `result` is the
+**`PipelineResult`** from `run_pipeline_resilient`. `get_cached` deserialized
+with `ScanResult(**json.loads(raw))`. A PipelineResult dump has no top-level
+`model_used` — it lives at `scan.model_used` — and that field is **required** on
+`ScanResult`, so every read raised:
+
+```
+1 validation error for ScanResult
+model_used
+  Field required [type=missing, ...]
+```
+
+...swallowed by the broad `except` and logged as *"Corrupt cache entry ...;
+re-running."*
+
+**Consequence 1 — the cache never hit. Not once.** Feature #9 was 100% miss for
+its entire existence, and the log blamed data corruption rather than a
+writer/reader type mismatch, so it read as a Redis problem forever.
+
+**Consequence 2 — a hit would have been a false negative.** The router hands the
+cached object straight to `_build_frontend_result`, which reads
+`getattr(pipeline, "scan", None)`. A `ScanResult` has no `.scan`, so that is
+`None` and the response reports **zero vulnerabilities**. Demonstrated: a
+CRITICAL SQL injection renders as a clean file with a green UI. For a security
+scanner that is the worst failure direction available, and it was one successful
+deserialization away.
+
+**A second defect, found while fixing the first.** `_record_hit(span)` fired
+*before* deserialization. Since deserialization always failed, every request
+incremented the hit counter **and** the miss counter — so
+`devguard.cache.hit_total` reported a healthy hit rate for a cache returning
+`None` every time. The metric said the opposite of the truth, on the dashboard
+built to watch it.
+
+Fixed by making the types symmetric and validating on read, so a genuinely
+wrong-shaped entry is still a miss rather than an empty scan result. **Verified
+against a real `redis-server`** (installed in this environment — not only the
+fake): cold miss, write, warm hit with all fields intact, TTL 86400s applied, and
+a policy bump `v1 → v2` correctly invalidating — the compliance-critical property
+`cache.py`'s own design notes call out ("we must never serve a verdict computed
+under an outdated ruleset").
+
+Also corrected `.env.example`, which claimed "the backend degrades to an
+in-process cache when it is unreachable". There is no in-process fallback; it
+runs cache-less.
+
+Evidence: `docs/audit-evidence/t2/cache-round-trip-defect.txt`.
+**Tests 209 → 225.**
+
 ### `GET /audit-log/verify` walked the chain on the event loop
 
 `GET /audit-log` was moved off-thread earlier; **this endpoint was missed.**
@@ -747,7 +803,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 209 passed
+pytest tests/                                -> 225 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -773,7 +829,7 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
 `live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`,
-`python-dependency-advisories.txt`.
+`python-dependency-advisories.txt`, `cache-round-trip-defect.txt`.
 
 ---
 
@@ -784,7 +840,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 209 passed
+python -m pytest tests/          # expect 225 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -857,6 +913,11 @@ Blocking first:
 - Do not claim a capability in a commit message before implementing it. This
   happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
   `f3bb8e5`.
+- **When a broad `except` logs a diagnosis, check the diagnosis.** The cache
+  said "Corrupt cache entry" on every single read for the life of the project.
+  It was not corruption — it was a type mismatch between the writer and the
+  reader, and the misleading message is why nobody looked. An error handler that
+  names a cause is asserting something, and it can be wrong.
 - **A green test against a defect you have already measured means the harness is
   wrong.** The event-loop starvation harness passed against the known-blocking
   handler because its baseline was taken after the blocking call finished. Verify
@@ -882,4 +943,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `51bd277` + this update. CI green on runs 21-28, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `1aa0b9e` + this update. CI green on runs 21-28, all four jobs.*
