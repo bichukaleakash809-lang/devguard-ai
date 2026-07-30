@@ -522,7 +522,9 @@ Return ONLY JSON matching this shape:
 
 
 @traced("scanner_agent")
-async def run_scanner(code: str, k_context: int = 4) -> ScanResult:
+async def run_scanner(
+    code: str, k_context: int = 4, override_model: Optional[str] = None
+) -> ScanResult:
     """
     Scanner Agent: RAG-augmented vulnerability detection.
     (see original docstring — unchanged)
@@ -531,12 +533,22 @@ async def run_scanner(code: str, k_context: int = 4) -> ScanResult:
     .cost_per_request, .cost_total) are incremented inside `_call_llm` ->
     `record_llm_observability`, tagged {"agent": "scanner", "model": ...}.
     No direct counter access needed here — see METRICS NOTE at top of file.
+
+    `override_model` exists for ONE caller: `resilience.run_pipeline_resilient`'s
+    degraded path, which needs the whole pipeline to run on a different model
+    after the primary provider has failed. It is deliberately not used by the
+    self-observation layer — cost pressure must never reach the Scanner, because
+    detection is the step where under-provisioning turns into a missed
+    vulnerability rather than a slightly worse patch. Left as None, the model is
+    MODEL_STRONG exactly as before.
     """
     store = get_store()
     retrieved = store.retrieve(code, k=k_context)
     context_block = format_cwe_context(retrieved)
 
-    model = MODEL_STRONG  # detection is too important to under-provision
+    # detection is too important to under-provision; only an explicit
+    # degradation (primary provider down) may change it
+    model = override_model or MODEL_STRONG
     numbered = "\n".join(f"{i+1}: {ln}" for i, ln in enumerate(code.splitlines()))
 
     user_prompt = (
@@ -774,7 +786,9 @@ async def run_validator(
 # ---------------------------------------------------------------------------
 
 @traced("devguard_pipeline")
-async def run_pipeline(code: str) -> PipelineResult:
+async def run_pipeline(
+    code: str, override_model: Optional[str] = None
+) -> PipelineResult:
     """
     Full DevGuard pipeline: Scan -> (Fix -> Validate)* with bounded reflection.
     (see original docstring — unchanged, including all SELF-OBSERVATION notes)
@@ -783,9 +797,20 @@ async def run_pipeline(code: str) -> PipelineResult:
     the number of vulnerabilities the Fixer claims to have addressed AND the
     Validator signed off on — i.e. only genuinely-resolved findings count,
     matching the Validator's adversarial-by-default philosophy.
+
+    `override_model` forces every agent onto one model, and exists for exactly
+    one caller: `resilience.run_pipeline_resilient`'s degraded path. Before it
+    existed, `resilience._invoke` accepted a model, recorded it as a span
+    attribute and then discarded it — so the "fallback" re-ran the identical
+    models the primary attempt had just failed on. That made the escape hatch a
+    plain retry, and made `llm.served_by` a false statement on the one surface an
+    on-call engineer reads during an incident.
+
+    Left as None (every other caller), routing is unchanged: severity-based for
+    the Scanner, severity-plus-self-observation for the Fixer.
     """
     try:
-        scan = await run_scanner(code)
+        scan = await run_scanner(code, override_model=override_model)
 
         routing: dict[str, str] = {"scanner": scan.model_used}
         routing_overrides: dict[str, str] = {}
@@ -798,6 +823,14 @@ async def run_pipeline(code: str) -> PipelineResult:
         if override_reason:
             routing_overrides["fixer"] = override_reason
             _set_span_attr_safe("routing.override_reason", override_reason)
+
+        # A resilience degradation outranks the self-observation layer's choice:
+        # the point of the degraded path is that the primary provider is down, so
+        # the adaptive model may be exactly the one that is failing.
+        if override_model is not None:
+            adaptive_model = override_model
+            routing_overrides["fixer"] = "resilience_degraded_path"
+            _set_span_attr_safe("routing.override_reason", "resilience_degraded_path")
 
         final_fix: Optional[FixResult] = None
         final_validation: Optional[ValidationResult] = None

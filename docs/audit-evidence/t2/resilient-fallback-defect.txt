@@ -1,0 +1,39 @@
+==========================================================================
+THE DEGRADED PATH
+==========================================================================
+PRIMARY_MODEL  = llama-3.3-70b-versatile
+FALLBACK_MODEL = llama-3.1-8b-instant
+
+Model override each attempt asked run_pipeline for:
+  attempt 1: pipeline's own severity routing
+  attempt 2: llama-3.1-8b-instant
+
+BEFORE the fix, `_invoke` accepted a model, set it as a span attribute and
+discarded it: `return await run_pipeline(request.code)`. So attempt 2 re-ran
+the SAME models attempt 1 had just failed on — a retry, not a degradation.
+`run_pipeline` had no override hook at all, hence the TypeError that the
+failing tests produced before this change.
+
+AFTER the fix, attempt 2 forces FALLBACK_MODEL through every agent:
+  asked == [None, 'llama-3.1-8b-instant']   <- different provisioning, as advertised
+
+==========================================================================
+THE SPAN ATTRIBUTES — what an on-call engineer reads during an incident
+==========================================================================
+  llm.degraded                     True
+  llm.fallback_model_requested     'llama-3.1-8b-instant'
+  llm.served_by                    'llama-3.1-8b-instant'
+
+BEFORE: `llm.served_by` was stamped from the FALLBACK_MODEL constant, so it
+named a model that had NOT run — the 70B model served the request while the
+trace said llama-3.1-8b-instant did. Now it is read off the result:
+  served_by comes from scan.model_used, and intent is recorded separately
+  as llm.fallback_model_requested so the two stay distinguishable.
+
+==========================================================================
+WHEN REQUESTED AND ACTUAL DIFFER (the case the constant could not express)
+==========================================================================
+  requested: llama-3.1-8b-instant
+  served_by: some-other-model-entirely
+
+ALL ASSERTIONS PASSED

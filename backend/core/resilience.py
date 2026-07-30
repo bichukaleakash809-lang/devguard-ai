@@ -57,7 +57,10 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.core.ai_agent import AgentExecutionError, run_pipeline
-from backend.core.schemas import ScanRequest, ScanResult
+# `run_pipeline` returns a PipelineResult; both functions below were
+# annotated `-> ScanResult`, which was simply wrong and made the module's
+# contract unreadable from its signatures.
+from backend.core.schemas import PipelineResult, ScanRequest, ScanResult  # noqa: F401
 from backend.core import telemetry
 
 # SELF-OBSERVATION: PostmortemAgent lives in a separate module so a missing or
@@ -389,7 +392,7 @@ def circuit_status() -> dict[str, Any]:
 
 
 @telemetry.traced("resilient_pipeline")
-async def run_pipeline_resilient(request: ScanRequest) -> ScanResult:
+async def run_pipeline_resilient(request: ScanRequest) -> PipelineResult:
     """
     The single entry point the API layer calls instead of run_pipeline directly.
 
@@ -407,9 +410,14 @@ async def run_pipeline_resilient(request: ScanRequest) -> ScanResult:
     span = telemetry.trace.get_current_span()
 
     # Attempt 1: primary via breaker.
+    #
+    # No model override — the pipeline's own routing stands. Forcing PRIMARY_MODEL
+    # here would flatten the per-agent decisions that matter: the Scanner
+    # deliberately always uses the strong model, and the Fixer may be adapted by
+    # the self-observation layer.
     try:
-        result = await _primary_breaker.call(_invoke, request, PRIMARY_MODEL)
-        span.set_attribute("llm.served_by", PRIMARY_MODEL)
+        result = await _primary_breaker.call(_invoke, request, override_model=None)
+        span.set_attribute("llm.served_by", _served_by(result))
         span.set_attribute("llm.degraded", False)
         return result
     except CircuitOpenError:
@@ -424,11 +432,17 @@ async def run_pipeline_resilient(request: ScanRequest) -> ScanResult:
             {"reason": "primary_failure", "error.type": type(exc).__name__},
         )
 
-    # Attempt 2: fallback model (NOT wrapped in the same breaker, so a primary
-    # outage doesn't also poison our escape hatch).
+    # Attempt 2: the degraded path. NOT wrapped in the same breaker, so a primary
+    # outage doesn't also poison our escape hatch — and now genuinely degraded:
+    # FALLBACK_MODEL is forced through every agent, so this is a different
+    # provisioning rather than a retry of whatever just failed.
+    span.set_attribute("llm.fallback_model_requested", FALLBACK_MODEL)
     try:
-        result = await _invoke(request, FALLBACK_MODEL)
-        span.set_attribute("llm.served_by", FALLBACK_MODEL)
+        result = await _invoke(request, override_model=FALLBACK_MODEL)
+        # Report what actually served it, read off the result — not the constant
+        # we asked for. These can differ, and during an incident the difference is
+        # the whole point of looking.
+        span.set_attribute("llm.served_by", _served_by(result))
         span.set_attribute("llm.degraded", True)
         return result
     except Exception as exc:  # noqa: BLE001
@@ -438,17 +452,36 @@ async def run_pipeline_resilient(request: ScanRequest) -> ScanResult:
         raise
 
 
+def _served_by(result: Any) -> str:
+    """The model that actually ran, taken off the result.
+
+    `llm.served_by` used to be stamped from the PRIMARY_MODEL / FALLBACK_MODEL
+    constants, i.e. from what this module *intended*. That was not merely
+    imprecise: `_invoke` discarded the model it was handed, so on the degraded
+    path the attribute named a model that had not run. An on-call engineer
+    reading a trace during an outage would have been told
+    `served_by: llama-3.1-8b-instant` while the 70B model served the request.
+
+    The Scanner's `model_used` is the right source: it is the first agent to run,
+    every path goes through it, and it records the model it actually invoked.
+    """
+    model = getattr(getattr(result, "scan", None), "model_used", None)
+    return model or "unknown"
+
+
 @telemetry.traced("llm_invoke")
-async def _invoke(request: ScanRequest, model_id: str) -> ScanResult:
+async def _invoke(
+    request: ScanRequest, override_model: Optional[str] = None
+) -> PipelineResult:
     """
     Thin wrapper around the AI module's run_pipeline.
 
-    INTEGRATION NOTE: ai_agent.run_pipeline() takes a raw code string and does
-    its own internal severity-based routing (select_model) — it has no model
-    override hook. We extract request.code here (not the ScanRequest object)
-    and record model_id only as a span attribute for observability, since the
-    breaker's routing intent is still worth seeing in traces even though the
-    AI layer doesn't act on it directly.
+    `override_model` is threaded all the way into the agents (see
+    `ai_agent.run_pipeline`), so a degradation actually changes which model runs.
+    It previously took a `model_id` that it recorded as a span attribute and then
+    dropped, which is what made the "fallback" a retry in disguise.
     """
-    telemetry.trace.get_current_span().set_attribute("llm.model_id", model_id)
-    return await run_pipeline(request.code)
+    telemetry.trace.get_current_span().set_attribute(
+        "llm.model_id", override_model or "pipeline-routed"
+    )
+    return await run_pipeline(request.code, override_model=override_model)

@@ -25,11 +25,11 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | # | Priority | Status |
 |---|---|---|
 | 1 | Performance | Two real bottlenecks found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`), `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`). No further hot path identified by measurement — do not "optimise" without a number first. |
-| 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness and the `/scan` response contract all had proven defects, all fixed with failing-test-first (`0a7341d`, `7678d26`, `296f37d`). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
+| 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract and the resilience degradation path all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
-| 6 | Test coverage | 58 → 181, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 190, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 181 passing**, all with no API key, no collector, no network.
+**Test inventory — 190 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -248,6 +248,9 @@ false-negative risk is real and stated.
 - `test_adaptive_routing_floor.py` (31) — the critical-severity safety floor
   holds for every spelling of "critical" and fails safe on anything it cannot
   parse, while non-critical severities stay downgradable
+- `test_resilient_fallback.py` (9) — the degraded path genuinely uses a
+  different model, and `llm.served_by` reports what ran rather than what was
+  requested
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -412,6 +415,55 @@ disabling cost control.
 Evidence: `docs/audit-evidence/t2/severity-floor-defect.txt` (old vs new floor,
 side by side, per input form). **Tests 150 → 181.**
 
+### "Graceful degradation" was a retry, and the span said otherwise
+
+README, Core Features: *"Circuit breaker + graceful degradation"*.
+`resilience.py`'s own SRE note: *"We annotate the ScanResult / span with which
+model actually served the request (`served_by`) ... so a judge (or on-call) can
+immediately see 'this answer came from the fallback' during an incident."*
+
+`_invoke(request, model_id)` took a model, set it as a span attribute, and threw
+it away:
+
+```python
+telemetry.trace.get_current_span().set_attribute("llm.model_id", model_id)
+return await run_pipeline(request.code)          # model_id unused
+```
+
+`run_pipeline` had no override hook at all. Two consequences:
+
+1. **The fallback was a plain retry.** It re-ran the identical models the primary
+   attempt had just failed on, so an outage caused by the 70B model being
+   unavailable would fail again for the same reason. The escape hatch offered no
+   different provisioning.
+2. **The span lied about it**, which is worse. The caller stamped
+   `llm.served_by = FALLBACK_MODEL` and `llm.degraded = True` unconditionally, so
+   a trace stated `llama-3.1-8b-instant` served the request while the 70B model
+   actually did — on the exact surface an on-call engineer trusts, in the exact
+   situation where being wrong costs the most.
+
+`_invoke`'s docstring was candid about the mechanism ("record model_id only as a
+span attribute ... even though the AI layer doesn't act on it directly"). The
+caller published it as fact anyway.
+
+Fixed: `override_model` threads from `run_pipeline_resilient` → `_invoke` →
+`run_pipeline` → `run_scanner`/`run_fixer`, so the degraded path genuinely runs
+on `FALLBACK_MODEL`. `llm.served_by` is now read off `scan.model_used` — what ran
+— with intent recorded separately as `llm.fallback_model_requested`, so the two
+stay distinguishable. A resilience degradation deliberately outranks the
+self-observation layer's adaptive choice, because the adaptive model may be the
+one that is failing.
+
+The Scanner's override is opt-in for this one caller only: **cost pressure must
+never reach the Scanner**, because under-provisioning detection produces a missed
+vulnerability rather than a slightly worse patch.
+
+Also corrected `run_pipeline_resilient` and `_invoke`'s return annotations, which
+said `-> ScanResult` while both return `PipelineResult`.
+
+Evidence: `docs/audit-evidence/t2/resilient-fallback-defect.txt`.
+**Tests 181 → 190.**
+
 ### Frontend dependency advisories — found, triaged, NOT actioned
 
 18 advisories (16 high, 2 moderate) in `next` and its nested `postcss`. `next`
@@ -509,7 +561,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 181 passed
+pytest tests/                                -> 190 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -532,7 +584,8 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `otel-collector-config-validation.txt`, `rag-dependency-finding.txt`,
 `pipeline-defects.txt`, `benchmark-defect.txt`, `audit-performance.txt`,
 `audit-endpoint-performance.txt`, `scan-response-fabrications.txt`,
-`frontend-dependency-advisories.txt`, `severity-floor-defect.txt`.
+`frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
+`resilient-fallback-defect.txt`.
 
 ---
 
@@ -543,7 +596,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 181 passed
+python -m pytest tests/          # expect 190 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
