@@ -636,6 +636,12 @@ SECURITY.md listed "no automated dependency-vulnerability scanning" as an open
 gap. A fourth CI job runs `pip-audit` and `npm audit` on every push and uploads
 both reports as artifacts.
 
+**Verified on GitHub, run 28 (`51bd277`).** All four jobs green, and the new job's
+own steps each succeeded: `pip-audit` (40 s), `npm audit` (18 s), artifact upload.
+Both artifacts exist on the run — `dependency-advisories` (3,546 bytes) and
+`otel-verification` (1,055 bytes) — so the "reports are uploaded" claim is checked,
+not asserted.
+
 It is **`continue-on-error: true`** and the reason is written into the workflow:
 both trees carry advisories with **no in-range fix** (`next` is already the newest
 14.x; the Python pins are frozen pending approval), so gating would leave CI red
@@ -876,4 +882,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `7baec1d` + this update. CI green on runs 21-26; run 27 pending.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `51bd277` + this update. CI green on runs 21-28, all four jobs.*
