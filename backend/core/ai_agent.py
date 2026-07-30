@@ -235,7 +235,7 @@ async def _select_model_adaptive(severity: str) -> tuple[str, Optional[str]]:
     base_model = select_model(severity)
     # GOD-TIER: make the MCP round-trip visible in SigNoz logs, not just its effect.
     mcp_logger.info(
-        "Querying SigNoz MCP Server for recent 30-min LLM spend + conservation-mode "
+        "Self-observation: reading recent 30-min LLM spend + conservation-mode "
         "flag (severity=%s, base_model=%s)...",
         severity,
         base_model,
@@ -244,7 +244,7 @@ async def _select_model_adaptive(severity: str) -> tuple[str, Optional[str]]:
         model, reason = await adaptive_select_model(severity, base_model)
         if reason:
             mcp_logger.info(
-                "SigNoz MCP Server-informed routing override: severity=%s base_model=%s "
+                "Self-observation-informed routing override: severity=%s base_model=%s "
                 "-> adaptive_model=%s reason=%r",
                 severity,
                 base_model,
@@ -253,7 +253,7 @@ async def _select_model_adaptive(severity: str) -> tuple[str, Optional[str]]:
             )
         else:
             mcp_logger.info(
-                "SigNoz MCP Server query returned no override; keeping base_model=%s",
+                "Self-observation query returned no override; keeping base_model=%s",
                 base_model,
             )
         return model, reason
@@ -278,9 +278,13 @@ def _safe_is_conservation_mode() -> bool:
     not a correctness one.
     """
     try:
-        mcp_logger.info("Querying SigNoz MCP Server for CostGuardian conservation-mode flag...")
+        mcp_logger.info("Self-observation: reading CostGuardian conservation-mode flag.")
         result = is_conservation_mode()
-        mcp_logger.info("SigNoz MCP Server reports conservation_mode_active=%s", result)
+        mcp_logger.info(
+            "Self-observation: conservation_mode_active=%s (source: in-process "
+            "telemetry shadow unless SIGNOZ_MCP_URL is configured)",
+            result,
+        )
         return result
     except Exception:  # noqa: BLE001
         logger.exception("SELF-OBSERVATION: is_conservation_mode() failed; reporting False")
@@ -724,6 +728,47 @@ async def run_pipeline(code: str) -> PipelineResult:
         final_fix: Optional[FixResult] = None
         final_validation: Optional[ValidationResult] = None
 
+        # ------------------------------------------------------------------ #
+        # Clean code short-circuit.
+        #
+        # A scan that reports nothing must not run the Fixer or the Validator.
+        # benchmark.py ships a negative control (`clean_parameterized`), so
+        # clean input is an expected path rather than an edge case, and the loop
+        # used to run anyway: up to 2 x MAX_REFLECTION_RETRIES paid LLM calls,
+        # with the Fixer asked to "harden defensively" code that had no reported
+        # findings — i.e. rewriting code that was already correct, then grading
+        # the rewrite.
+        #
+        # final_fix records the no-op honestly (original code, no CWEs, and a
+        # model_used that names no model). final_validation stays None: no
+        # Validator ran, and there is no honest eval_score to invent for one.
+        # ------------------------------------------------------------------ #
+        if not scan.vulnerabilities:
+            logger.info("Scanner reported no vulnerabilities; skipping Fixer/Validator.")
+            _set_span_attr_safe("pipeline.short_circuit", "no_vulnerabilities")
+            return PipelineResult(
+                original_code=code,
+                scan=scan,
+                final_fix=FixResult(
+                    patched_code=code,
+                    diff_summary=(
+                        "No vulnerabilities reported by the Scanner; code returned "
+                        "unmodified. The Fixer was not invoked."
+                    ),
+                    addressed_cwe_ids=[],
+                    model_used="none (no vulnerabilities reported)",
+                ),
+                final_validation=None,
+                reflection_history=[],
+                converged=True,
+                routing_decisions=routing,
+                self_observation=SelfObservationSummary(
+                    routing_override=None,
+                    context_k_adjusted=False,
+                    conservation_mode_active=_safe_is_conservation_mode(),
+                ),
+            )
+
         for attempt in range(1, MAX_REFLECTION_RETRIES + 1):
             fix = await run_fixer(
                 code,
@@ -790,7 +835,7 @@ async def run_pipeline(code: str) -> PipelineResult:
         # CostGuardian batches its cumulative-cost checks against, so it must
         # fire even when the pipeline raises above.
         try:
-            mcp_logger.info("Querying SigNoz MCP Server: recording scan tick for CostGuardian batching...")
+            mcp_logger.info("Self-observation: recording scan tick for CostGuardian batching.")
             await record_scan()
         except Exception:  # noqa: BLE001 — must never mask the real exception
             logger.exception("SELF-OBSERVATION: record_scan() failed; continuing")

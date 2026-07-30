@@ -236,8 +236,14 @@ class PipelineResult(BaseModel):
     """
     original_code: str
     scan: ScanResult
-    final_fix: FixResult
-    final_validation: ValidationResult
+    # Optional because a scan that reports no vulnerabilities does not run the
+    # Fixer or the Validator — there is nothing to fix and nothing to review.
+    # `final_validation` is None in that case rather than carrying a synthesised
+    # eval_score: no model graded this code, so no number may imply one did
+    # (LAW 3). backend/api/router.py already guards every read of these with
+    # getattr(..., None), so Optional matches how they are actually consumed.
+    final_fix: Optional[FixResult] = None
+    final_validation: Optional[ValidationResult] = None
     reflection_history: list[ReflectionAttempt] = Field(default_factory=list)
     converged: bool = Field(
         ...,
