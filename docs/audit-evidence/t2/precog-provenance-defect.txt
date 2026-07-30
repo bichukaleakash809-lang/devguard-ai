@@ -1,0 +1,65 @@
+PRE-COG PANEL: 'live' BADGE OVER INVENTED MEMORY FIGURES
+=======================================================
+
+god_mode_orchestrator.py docstring: 'Every response includes a data_source
+field: "live" when it was computed from a real pipeline/telemetry call.'
+SECURITY.md: 'Honest provenance. Every god-mode response carries a
+data_source ... An in-process estimate is never presented as retrieved
+telemetry.'
+
+THE DEFECT
+----------
+execute_precog_agent flipped data_source to "live" when the ERROR RATE came
+back from MCP. The memory axis of the same response was unconditionally
+invented:
+
+    starting_rss_mb      = round(random.uniform(160.0, 260.0), 1)
+    leak_rate_mb_per_min = round(random.uniform(2.0, 14.0), 2)
+    minutes_to_oom       = (oom_ceiling_mb - starting_rss_mb) / leak_rate_mb_per_min
+
+So a payload badged "live" carried a fabricated current RSS, a fabricated
+leak rate, and an OOM countdown derived from both. All three are rendered by
+frontend/components/nexus/PreCogPanel.tsx as 'Starting RSS', 'Leak rate' and
+'Projected OOM'.
+
+One axis being real does not make the other real. This is the same mislabel
+already fixed twice in T1: the MCP cost fallback reporting "live", and the
+executive roll-up deriving provenance from the absence of errors.
+
+FIX 1 — the current RSS is MEASURABLE, so measure it
+----------------------------------------------------
+It is this process's own resident set size. Read from /proc/self/statm
+(exact pages x SC_PAGE_SIZE), falling back to resource.getrusage.
+
+Cross-checked against ps on the running server:
+
+    ps RSS:              89760 kB = 87.7 MB   (pid 8023)
+    endpoint reports:    87.7 MB
+
+    -> the same number. Ten consecutive reads stay inside a 5 MB band, which
+       random.uniform(160, 260) cannot do — that is the regression test.
+
+FIX 2 — per-field provenance, and an aggregate that does not overstate
+----------------------------------------------------------------------
+The leak RATE cannot be derived from a single sample, so it stays a scenario
+parameter and is labelled as one. The aggregate reports the WEAKEST
+component, never the strongest, and says "partial" when the axes disagree.
+
+Live response, MCP unconfigured:
+    data_source        partial
+    data_source_detail {'error_rate': 'synthetic', 'memory': 'measured_current_synthetic_rate'}
+      starting_rss_mb            87.7
+      leak_rate_mb_per_min       8.51
+      oom_ceiling_mb             1536.0
+      projected_minutes_to_oom   170.2
+      current_rss_source         measured
+      rate_source                synthetic_scenario
+      projection_source          derived_from_synthetic_rate
+
+    'partial' rather than 'synthetic': the current RSS really is measured, so
+    'synthetic' would UNDERSTATE the payload. A test asserting 'synthetic'
+    was written before the measurement existed and was corrected, not the code.
+
+The UI labels each figure individually — 'Current RSS (measured)',
+'Leak rate (sim)', 'Projected OOM (sim)' — so none of them inherits the
+panel's badge.

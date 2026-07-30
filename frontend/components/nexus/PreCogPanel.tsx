@@ -91,6 +91,12 @@ export default function PreCogPanel({ data, status, error, elapsedMs, onRunSingl
   const leakRate = num(mem, "leak_rate_mb_per_min");
   const oomCeiling = num(mem, "oom_ceiling_mb");
   const minutesToOom = num(mem, "projected_minutes_to_oom");
+  // "measured" when the backend read this process's real RSS; "synthetic" when
+  // /proc was unreadable and it fell back. Never assume — the field is absent on
+  // an older backend, and absent must not read as measured.
+  const rssSource = typeof mem?.["current_rss_source"] === "string"
+    ? (mem["current_rss_source"] as string)
+    : null;
 
   const hasData = status === "complete" && data !== null;
 
@@ -146,15 +152,31 @@ export default function PreCogPanel({ data, status, error, elapsedMs, onRunSingl
             <ForecastChart points={forecast} threshold={tripThreshold} />
           </div>
 
+          {/* The four figures here have DIFFERENT origins, so the panel labels
+              them individually. The backend used to badge the whole payload
+              "live" whenever the error rate came from telemetry, while all four
+              of these were random.uniform draws. Current RSS is now a real
+              reading of the process; the leak rate is a scenario parameter, and
+              the OOM projection is derived from it — so both say so rather than
+              inheriting the panel's badge. */}
           <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-5">
-            <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">
-              Memory forecast
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+                Memory forecast
+              </div>
+              <div className="text-[10px] text-white/30">
+                current RSS {rssSource === "measured" ? "measured" : "simulated"} ·
+                leak rate simulated
+              </div>
             </div>
             <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2.5 text-xs sm:grid-cols-4">
-              <MemStat label="Starting RSS" value={startingRss} suffix=" MB" decimals={1} />
-              <MemStat label="Leak rate" value={leakRate} suffix=" MB/min" decimals={2} />
+              <MemStat
+                label={rssSource === "measured" ? "Current RSS (measured)" : "Current RSS (sim)"}
+                value={startingRss} suffix=" MB" decimals={1}
+              />
+              <MemStat label="Leak rate (sim)" value={leakRate} suffix=" MB/min" decimals={2} />
               <MemStat label="OOM ceiling" value={oomCeiling} suffix=" MB" decimals={0} />
-              <MemStat label="Projected OOM" value={minutesToOom} suffix=" min" decimals={1} />
+              <MemStat label="Projected OOM (sim)" value={minutesToOom} suffix=" min" decimals={1} />
             </dl>
           </div>
         </>

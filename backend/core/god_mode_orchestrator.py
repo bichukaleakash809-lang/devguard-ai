@@ -42,7 +42,9 @@ that's already JSON-serializable.
 from __future__ import annotations
 
 import logging
+import os
 import random
+import resource
 import time
 import uuid
 from datetime import datetime, timezone
@@ -104,6 +106,58 @@ def _now_iso() -> str:
 
 def _god_mode_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def _current_rss_mb() -> Optional[float]:
+    """This process's resident set size in MiB, or None if unreadable.
+
+    The Pre-Cog panel's "current RSS" was `random.uniform(160.0, 260.0)` — an
+    invented figure for a quantity the process can simply ask about. Read from
+    `/proc/self/statm` where available (Linux, exact pages) and otherwise from
+    `resource.getrusage`, whose `ru_maxrss` unit differs by platform: KiB on
+    Linux, bytes on macOS.
+
+    Returns None rather than raising, so a god-mode panel never 500s because
+    /proc is unreadable — the caller falls back and labels the value synthetic.
+    """
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as fh:
+            resident_pages = int(fh.read().split()[1])
+        return round(resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 1)
+    except Exception:  # noqa: BLE001 — fall through to the portable path
+        pass
+    try:
+        import sys
+
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+        return round(max_rss / divisor, 1)
+    except Exception:  # noqa: BLE001 — never let a memory read break a panel
+        logger.debug("_current_rss_mb: could not read RSS", exc_info=True)
+        return None
+
+
+#: Ranking used to reduce per-axis provenance to one honest aggregate.
+_SOURCE_RANK = {"live": 3, "local_shadow": 2, "measured": 2, "synthetic": 0}
+
+
+def _aggregate_source(*sources: str) -> str:
+    """One `data_source` for a payload assembled from differently-sourced parts.
+
+    The rule: report the WEAKEST component, not the strongest, and say "partial"
+    when they disagree. A single flag that reports the most favourable part is
+    how a payload containing invented memory figures came to be badged "live".
+
+    "measured" and "local_shadow" both mean real-but-not-retrieved-telemetry, so
+    they rank together and below "live".
+    """
+    if not sources:
+        return "synthetic"
+    ranks = {_SOURCE_RANK.get(s, 1) for s in sources}
+    if len(ranks) == 1:
+        only = sources[0]
+        return only if only in _SOURCE_RANK else "partial"
+    return "synthetic" if min(ranks) == 0 and max(ranks) == 0 else "partial"
 
 
 def _synthetic_diff(original_hint: str = "") -> tuple[str, str, str]:
@@ -286,7 +340,7 @@ async def execute_precog_agent() -> dict[str, Any]:
     "in the next N minutes..." narrative, clearly labeled as a forecast.
     """
     run_id = _god_mode_id("precog")
-    data_source = "synthetic"
+    error_rate_source = "synthetic"
     current_error_rate_pct = round(random.uniform(1.0, 8.0), 2)
 
     try:
@@ -294,7 +348,7 @@ async def execute_precog_agent() -> dict[str, Any]:
         err = await client.get_error_rate_detailed()
         if err.available:
             current_error_rate_pct = err.error_rate_pct
-            data_source = "live"
+            error_rate_source = "live"
     except Exception:  # noqa: BLE001
         logger.exception("execute_precog_agent: get_error_rate_detailed() failed; using synthetic baseline")
 
@@ -315,14 +369,37 @@ async def execute_precog_agent() -> dict[str, Any]:
             minutes_to_breaker_trip = point["minute"]
             break
 
-    # Memory-leak style projection (RSS), independent axis from error rate.
-    starting_rss_mb = round(random.uniform(160.0, 260.0), 1)
+    # Memory-leak projection. INDEPENDENT AXIS from the error rate, and that
+    # independence is the point: this block used to be entirely
+    # `random.uniform`, while `data_source` above flipped to "live" whenever the
+    # *error rate* came back from MCP. So a payload badged "live" carried a
+    # fabricated current RSS, a fabricated leak rate, and an OOM countdown
+    # derived from both — all three rendered by PreCogPanel.tsx. One axis being
+    # real does not make the other real.
+    #
+    # The current RSS is measurable: it is this process's own resident set size,
+    # one stdlib call away. There was never a reason to invent it. The leak
+    # *rate* cannot be derived from a single sample, so it stays a scenario
+    # parameter — and is now labelled as one instead of passing for a measurement.
+    measured_rss = _current_rss_mb()
+    if measured_rss is not None:
+        starting_rss_mb = measured_rss
+        current_rss_source = "measured"
+    else:
+        starting_rss_mb = round(random.uniform(160.0, 260.0), 1)
+        current_rss_source = "synthetic"
+
     leak_rate_mb_per_min = round(random.uniform(2.0, 14.0), 2)
     oom_ceiling_mb = 1536.0
     minutes_to_oom = (
         round((oom_ceiling_mb - starting_rss_mb) / leak_rate_mb_per_min, 1)
         if leak_rate_mb_per_min > 0
         else None
+    )
+    memory_source = (
+        "measured_current_synthetic_rate"
+        if current_rss_source == "measured"
+        else "synthetic"
     )
 
     autoscale_recommendation = (
@@ -334,7 +411,17 @@ async def execute_precog_agent() -> dict[str, Any]:
     return {
         "run_id": run_id,
         "module": "precog_ops",
-        "data_source": data_source,
+        # The AGGREGATE, and it must not report the most favourable component.
+        # This used to be a single flag flipped to "live" by the error-rate query
+        # alone, while the memory axis stayed invented. "partial" is the honest
+        # answer whenever the two axes disagree — the same mislabel already fixed
+        # twice in T1 (the MCP cost fallback reporting "live", and the executive
+        # roll-up deriving provenance from the absence of errors).
+        "data_source": _aggregate_source(error_rate_source, memory_source),
+        "data_source_detail": {
+            "error_rate": error_rate_source,
+            "memory": memory_source,
+        },
         "started_at": _now_iso(),
         "current_error_rate_pct": current_error_rate_pct,
         "error_rate_forecast": forecast,
@@ -345,6 +432,11 @@ async def execute_precog_agent() -> dict[str, Any]:
             "leak_rate_mb_per_min": leak_rate_mb_per_min,
             "oom_ceiling_mb": oom_ceiling_mb,
             "projected_minutes_to_oom": minutes_to_oom,
+            # Per-field provenance, because these three have different origins
+            # and a single label for the group would have to lie about one.
+            "current_rss_source": current_rss_source,
+            "rate_source": "synthetic_scenario",
+            "projection_source": "derived_from_synthetic_rate",
         },
         "autoscale_recommendation": autoscale_recommendation,
         "reasoning": (

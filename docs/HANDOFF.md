@@ -29,7 +29,7 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed** (failed open on casing variance), **the human-in-the-loop approval gate fixed** (never opened at all), **the audit trail now records a real verdict** (35/35 entries said `unknown`). Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 286, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 296, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 286 passing**, all with no API key, no collector, no network.
+**Test inventory — 296 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -271,6 +271,8 @@ false-negative risk is real and stated.
   part of a window was approximated
 - `test_self_observation_loops.py` (9) — which of the four advertised loops are
   actually wired, so the README's differentiator table cannot drift from the code
+- `test_god_mode_provenance.py` (10) — a `data_source` label reports the weakest
+  component of its payload, and the Pre-Cog current RSS is a real measurement
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -530,6 +532,47 @@ missing `created_at` is never discarded — no pending human decision is thrown
 away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
+
+### The Pre-Cog panel badged invented memory figures as "live"
+
+`god_mode_orchestrator.py`'s docstring and SECURITY.md both promise that
+`data_source` describes the payload — *"An in-process estimate is never presented
+as retrieved telemetry."* `execute_precog_agent` broke that.
+
+It flipped `data_source` to `"live"` whenever the **error rate** came back from
+MCP, while the memory axis of the same response was unconditionally invented:
+
+```python
+starting_rss_mb      = round(random.uniform(160.0, 260.0), 1)
+leak_rate_mb_per_min = round(random.uniform(2.0, 14.0), 2)
+minutes_to_oom       = (oom_ceiling_mb - starting_rss_mb) / leak_rate_mb_per_min
+```
+
+All three are rendered by `PreCogPanel.tsx` as "Starting RSS", "Leak rate" and
+"Projected OOM". One axis being real does not make the other real — the same
+mislabel already fixed twice in T1 (the MCP cost fallback reporting "live", and
+the executive roll-up deriving provenance from the absence of errors).
+
+**The current RSS is measurable, so it is now measured.** It is this process's own
+resident set size: `/proc/self/statm` (exact pages × `SC_PAGE_SIZE`), falling back
+to `resource.getrusage`. Cross-checked against `ps` on the running server — `ps`
+reported **89704 kB = 87.6 MB** and the endpoint reported **87.6 MB**. The
+regression test takes ten consecutive reads and requires a spread under 5 MB,
+which `random.uniform(160, 260)` cannot satisfy.
+
+The leak *rate* cannot be derived from a single sample, so it stays a scenario
+parameter and says so (`rate_source: "synthetic_scenario"`,
+`projection_source: "derived_from_synthetic_rate"`). `_aggregate_source` reports
+the **weakest** component, never the strongest, and "partial" when the axes
+disagree. The UI labels each figure individually so none inherits the panel badge.
+
+**A test of mine was wrong, not the code.** I asserted `data_source ==
+"synthetic"` with no MCP — written before the RSS measurement existed. With a real
+current RSS in the payload, "synthetic" *understates* it; `"partial"` is accurate.
+Corrected the test and said why in it.
+
+Evidence: `docs/audit-evidence/t2/precog-provenance-defect.txt`.
+**Tests 286 → 296.**
 
 ### One of the four advertised self-observation loops does not fire
 
@@ -1026,7 +1069,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 286 passed
+pytest tests/                                -> 296 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -1053,7 +1096,7 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
 `live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`,
 `python-dependency-advisories.txt`, `cache-round-trip-defect.txt`, `cost-accounting-defect.txt`,
-`approval-gate-and-verdict-defect.txt`, `cost-shadow-accuracy.txt`.
+`approval-gate-and-verdict-defect.txt`, `cost-shadow-accuracy.txt`, `precog-provenance-defect.txt`.
 
 ---
 
@@ -1064,7 +1107,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 286 passed
+python -m pytest tests/          # expect 296 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -1180,4 +1223,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `3d72631` + this update. CI green on runs 21-33, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `79c2b6b` + this update. CI green on runs 21-34, all four jobs.*
