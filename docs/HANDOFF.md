@@ -28,7 +28,7 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract and the resilience degradation path all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
-| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
+| 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
 | 6 | Test coverage | 58 → 209, contract and regression tests throughout. |
 
 ---
@@ -589,6 +589,61 @@ Against an LLM call measured in hundreds of milliseconds to seconds, that is
 noise. Recorded as a **negative result** so nobody "optimises" it later without
 a number — see the standing rule below.
 
+### Python dependency advisories — 56 across 7 packages, first ever audit
+
+`requirements.txt` had never been audited. `pip-audit 2.10.1` reports **56 known
+vulnerabilities in 7 packages**. Triaged per advisory from the code, not reported
+as a count:
+
+| Package | Pinned | Advisories | Reachable? |
+|---|---|---|---|
+| `aiohttp` | 3.9.1 | 30 | **No** — pinned directly at requirements.txt:18 and never imported |
+| `starlette` | 0.27.0 | 7 unique | **No** — the one package genuinely in the request path; see below |
+| `transformers` | 4.57.6 | 5 | **No** — via `sentence-transformers`, itself unimportable |
+| `fastapi` | 0.104.1 | 1 | **No** — the `python-multipart` ReDoS; that package is not installed |
+| `protobuf` | 4.25.9 | 1 | **No** — `json_format.ParseDict` never called |
+| `python-dotenv` | 1.0.0 | 1 | **No** — `set_key`/`unset_key` never called |
+| `pytest` | 8.4.2 | 1 | **No** — test-only |
+
+Established from the code, not assumed. Runtime import graph, measured by
+importing the real app and inspecting `sys.modules`:
+
+```
+aiohttp / transformers / torch / chromadb /
+sentence_transformers / multipart   -> imported by the running app: False
+```
+
+35 of the 56 are therefore in code that never loads. Source greps, all with zero
+hits in `backend/`, `scripts/`, `groq_client.py`: `StaticFiles`/`app.mount`,
+`HTTPEndpoint`, `request.url`/`base_url`/`url_for`, `Form(`/`UploadFile`/`File(`,
+`set_key`/`unset_key`, `ParseDict`.
+
+**Stated carefully:** all 56 are unreachable *given the code as it stands today*.
+That is a fact about this app's current shape, not a clean bill of health. The
+`starlette` `request.url` pair (PYSEC-2026-161, -248) is the most likely to become
+reachable — any future route that reconstructs a URL from the request lights it
+up.
+
+**Not actioned** (§13.1). Recommended order when approved: drop `aiohttp` (30
+advisories, zero functionality), then `starlette` via a compatible `fastapi`,
+then `chromadb`/`sentence-transformers`. Evidence:
+`docs/audit-evidence/t2/python-dependency-advisories.txt`. Tracked as open
+issue 10.
+
+### CI now scans dependencies — report-only, on purpose
+
+SECURITY.md listed "no automated dependency-vulnerability scanning" as an open
+gap. A fourth CI job runs `pip-audit` and `npm audit` on every push and uploads
+both reports as artifacts.
+
+It is **`continue-on-error: true`** and the reason is written into the workflow:
+both trees carry advisories with **no in-range fix** (`next` is already the newest
+14.x; the Python pins are frozen pending approval), so gating would leave CI red
+until an approved upgrade lands, and would go red again on any upstream
+publication against a pinned version — a failure with no code change behind it,
+which trains people to ignore CI. The job informs; it does not gate. A green tick
+there does **not** mean "no advisories".
+
 ### Frontend dependency advisories — found, triaged, NOT actioned
 
 18 advisories (16 high, 2 moderate) in `next` and its nested `postcss`. `next`
@@ -711,7 +766,8 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `audit-endpoint-performance.txt`, `scan-response-fabrications.txt`,
 `frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
-`live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`.
+`live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`,
+`python-dependency-advisories.txt`.
 
 ---
 
@@ -763,6 +819,16 @@ Blocking first:
    hackathon (README says *Agents of SigNoz*, contracts say *Build with
    DataHub*). Note `9651db3` cited in `01_PLATFORM_MASTER.md` does not exist in
    this repo's history.
+10. **Python dependency bumps?** 56 advisories across 7 pinned packages, all
+   unreachable in the current code (triaged per advisory — see above). Three
+   independent decisions: (a) **drop `aiohttp`** — nothing imports it, 30 of the
+   56 advisories, zero functionality lost, and the cheapest win available;
+   (b) **bump `starlette` via a compatible `fastapi`** — the only package in the
+   request path, clearing the multipart class and the `request.url` pair;
+   (c) `protobuf` / `python-dotenv`, low-risk and low-value since neither entry
+   point is called. Each needs the 209 tests, `verify_otel.py` and the five
+   frontend routes re-verified. Evidence:
+   `docs/audit-evidence/t2/python-dependency-advisories.txt`.
 9. **Upgrade `next` 14 → 16?** 18 open advisories (16 high) and `next` is already
    at the newest 14.x, so there is no in-range fix. Most are structurally
    unreachable in this app; the response/RSC cache-confusion class is not. A
@@ -810,4 +876,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `77e3b29` + this update. CI green on runs 21-26.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `7baec1d` + this update. CI green on runs 21-26; run 27 pending.*

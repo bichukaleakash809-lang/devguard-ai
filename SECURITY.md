@@ -116,5 +116,52 @@ CUDA); both are optional accelerators behind `try/except` in
 **Secret scanning runs in CI** on every push (`.github/workflows/ci.yml`): the
 full git history is scanned for `gsk_*`, `sk-*`, `AKIA*` and PEM private-key
 patterns, and the job fails if `.env` or `frontend/.env.local` is ever tracked
-again. There is **no automated dependency-vulnerability scanning** yet
-(Dependabot / `pip-audit` / `npm audit` in CI) — that remains open.
+again.
+
+**Dependency scanning also runs in CI** on every push — `pip-audit` against
+`requirements.txt` and `npm audit` against `frontend/package-lock.json`, with
+both reports uploaded as build artifacts. It is deliberately **report-only and
+does not gate the build**: both trees carry known advisories with no in-range
+fix (`next` is already the newest 14.x; the Python pins are frozen pending owner
+approval), so gating would leave CI red until an approved upgrade lands and would
+go red again on any upstream publication against a pinned version — a failure
+with no code change behind it. **Do not read a green tick on that job as "no
+advisories" — read the report.**
+
+### Python dependency advisories — 56 across 7 packages, all currently unreachable
+
+`requirements.txt` had never been audited. `pip-audit` reports **56 known
+vulnerabilities in 7 packages**. Triaged per advisory against this codebase
+rather than reported as a count:
+
+| Package | Pinned | Advisories | Reachable here? |
+|---|---|---|---|
+| `aiohttp` | 3.9.1 | 30 | **No** — pinned directly, never imported by the running app |
+| `starlette` | 0.27.0 | 7 unique | **No** — see below; the one package genuinely in the request path |
+| `transformers` | 4.57.6 | 5 | **No** — arrives via `sentence-transformers`, which is itself unimportable |
+| `fastapi` | 0.104.1 | 1 | **No** — the `python-multipart` ReDoS; that package is not installed |
+| `protobuf` | 4.25.9 | 1 | **No** — `json_format.ParseDict` is never called |
+| `python-dotenv` | 1.0.0 | 1 | **No** — `set_key`/`unset_key` are never called |
+| `pytest` | 8.4.2 | 1 | **No** — test-only, not shipped |
+
+Reachability was established from the code, not assumed: the runtime import graph
+(measured by importing the real app and inspecting `sys.modules`) shows
+`aiohttp`, `transformers`, `torch`, `chromadb`, `sentence_transformers` and
+`multipart` are **never loaded** — 35 of the 56 sit in code that does not run.
+For Starlette, the three multipart advisories need form parsing that this
+JSON-only API cannot perform (`python-multipart` is absent, no route declares
+`Form`/`File`/`UploadFile`); `StaticFiles` is never mounted; no `HTTPEndpoint`
+subclass exists; and nothing reads `request.url`.
+
+**Stated carefully:** every one is unreachable *given the code as it stands
+today*. That is a fact about this application's current shape, not a clean bill of
+health for the dependencies. The `starlette` `request.url` pair
+(PYSEC-2026-161, PYSEC-2026-248) is the most likely to become reachable — any
+future route that reconstructs a URL from the request would light it up.
+
+**Nothing has been changed** (contract §13.1: no dependency changes without
+explicit approval). Recommended order when approved: drop `aiohttp` (30
+advisories, zero functionality), then bump `starlette` via a compatible
+`fastapi`, then resolve `chromadb`/`sentence-transformers`. Full per-advisory
+reasoning and raw output:
+`docs/audit-evidence/t2/python-dependency-advisories.txt`.

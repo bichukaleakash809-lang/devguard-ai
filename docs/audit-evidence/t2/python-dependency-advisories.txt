@@ -1,0 +1,165 @@
+PYTHON DEPENDENCY ADVISORIES — measured, triaged, NOT actioned
+==============================================================
+First time requirements.txt has ever been audited. DevGuard is a security tool,
+so its own dependency posture is in scope.
+
+    pip-audit 2.10.1 -r requirements.txt
+    -> Found 56 known vulnerabilities in 7 packages
+
+Per-package, with the reachability question answered from the code rather than
+assumed:
+
+  package         pinned    advisories  reachable in THIS app?
+  --------------- --------- ----------  ----------------------------------------
+  aiohttp         3.9.1     30          NO  — never imported by the running app
+  starlette       0.27.0     9 (7 uniq) NO  — see the per-advisory triage below
+  transformers    4.57.6     5          NO  — never imported; arrives via
+                                              sentence-transformers, which is
+                                              itself unimportable (open issue 4)
+  fastapi         0.104.1    1          NO  — PYSEC-2024-38 is the
+                                              python-multipart ReDoS; that
+                                              package is NOT INSTALLED
+  protobuf        4.25.9     1          NO  — json_format.ParseDict is never called
+  python-dotenv   1.0.0      1          NO  — set_key/unset_key are never called
+  pytest          8.4.2      1          NO  — test-only, not shipped
+
+HOW REACHABILITY WAS ESTABLISHED (commands, not judgement)
+----------------------------------------------------------
+Runtime import graph, measured by importing the real app and inspecting
+sys.modules:
+
+    aiohttp                imported by the running app: False
+    transformers           imported by the running app: False
+    torch                  imported by the running app: False
+    chromadb               imported by the running app: False
+    sentence_transformers   imported by the running app: False
+    multipart              imported by the running app: False
+
+So 35 of the 56 advisories (aiohttp + transformers) are in code that is never
+loaded. `aiohttp==3.9.1` is pinned DIRECTLY in requirements.txt at line 18 and
+nothing imports it — 30 advisories from a package that does nothing.
+
+Source greps, all returning no hits in backend/, scripts/, groq_client.py:
+
+    StaticFiles / app.mount        -> none  (kills PYSEC-2026-2281)
+    HTTPEndpoint                   -> none  (kills PYSEC-2026-2280)
+    request.url / base_url / url_for -> none (kills PYSEC-2026-161, -248)
+    Form( / UploadFile / File(     -> none  (kills PYSEC-2026-1943, -1941, -249)
+    set_key / unset_key            -> none  (kills PYSEC-2026-2270)
+    ParseDict / json_format        -> none  (kills PYSEC-2026-1805)
+
+STARLETTE, PER ADVISORY — the one package genuinely in the request path
+-----------------------------------------------------------------------
+  PYSEC-2026-1943  multipart form fields buffered without a size limit
+  PYSEC-2026-1941  large multipart files mishandled
+  PYSEC-2026-249   request.form() limits not enforced for urlencoded bodies
+      -> All three require multipart/urlencoded form parsing. This API is
+         JSON-only: no route declares Form/File/UploadFile, and
+         `pip show python-multipart` reports "Package(s) not found", so
+         Starlette cannot parse multipart at all in this install.
+
+  PYSEC-2026-161   Host header not validated when reconstructing request.url
+  PYSEC-2026-248   request path not validated when reconstructing request.url
+      -> Both trigger through `request.url`. Nothing in backend/ reads
+         request.url, base_url, or url_for. NOTE: this is the pair most likely
+         to become reachable — any future route that builds a URL from the
+         request would light it up.
+
+  PYSEC-2026-2281  StaticFiles UNC-path SSRF, Windows only
+      -> StaticFiles is never mounted, and deployment targets are Linux.
+
+  PYSEC-2026-2280  HTTPEndpoint method dispatch via getattr
+      -> All routes are function-based (@router.get/@router.post). No
+         HTTPEndpoint subclass exists.
+
+CONCLUSION, STATED CAREFULLY
+----------------------------
+Every one of the 56 is unreachable **given the code as it stands today**. That is
+a statement about this application's current shape, not a clean bill of health
+for the dependencies: they are real vulnerabilities in shipped packages, and the
+starlette request.url pair in particular would become reachable the moment a
+route reconstructs a URL.
+
+NOTHING WAS CHANGED. Contract §13.1 forbids dependency changes without explicit
+approval, and the standing instruction for this session repeats it.
+
+RECOMMENDATION FOR THE OWNER, in priority order
+-----------------------------------------------
+1. Drop `aiohttp==3.9.1`. Nothing imports it; it contributes 30 of the 56
+   advisories and zero functionality. Lowest-risk, highest-reduction change
+   available.
+2. Bump `starlette` (via a compatible `fastapi`) — the only package in the
+   request path. `fastapi==0.104.1` pins starlette 0.27.0; a modern fastapi
+   brings starlette >= 0.40 and clears the whole multipart class plus the
+   request.url pair. Needs the API surface re-verified: 209 tests, verify_otel.py,
+   and the five frontend routes.
+3. Resolve `chromadb` / `sentence-transformers` (open issue 4). Both are
+   unimportable already; removing them also removes the transformers advisories
+   and ~5.4 GiB of install.
+4. `protobuf` and `python-dotenv` bumps are low-risk but also low-value here,
+   since neither advisory's entry point is called.
+
+CI now runs pip-audit and npm audit on every push, report-only. See the comment
+block in .github/workflows/ci.yml for why it does not gate.
+
+RAW pip-audit OUTPUT
+===================
+Found 56 known vulnerabilities in 7 packages
+Name          Version ID              Fix Versions
+------------- ------- --------------- -------------
+fastapi       0.104.1 PYSEC-2024-38   0.109.1
+python-dotenv 1.0.0   PYSEC-2026-2270 1.2.2
+aiohttp       3.9.1   PYSEC-2024-24   3.9.2
+aiohttp       3.9.1   PYSEC-2024-24   3.9.2
+aiohttp       3.9.1   PYSEC-2024-26   3.9.2
+aiohttp       3.9.1   PYSEC-2024-26   3.9.2
+aiohttp       3.9.1   PYSEC-2026-2102 3.13.4
+aiohttp       3.9.1   PYSEC-2026-1100 3.13.3
+aiohttp       3.9.1   PYSEC-2026-1101 3.13.3
+aiohttp       3.9.1   PYSEC-2026-1098 3.9.4
+aiohttp       3.9.1   PYSEC-2026-1103 3.10.11
+aiohttp       3.9.1   PYSEC-2026-1102 3.9.4
+aiohttp       3.9.1   PYSEC-2026-1104 3.12.14
+aiohttp       3.9.1   PYSEC-2026-1106 3.13.3
+aiohttp       3.9.1   PYSEC-2026-1107 3.13.3
+aiohttp       3.9.1   PYSEC-2026-1099 3.13.3
+aiohttp       3.9.1   PYSEC-2026-1105 3.13.3
+aiohttp       3.9.1   PYSEC-2026-237  3.14.1
+aiohttp       3.9.1   PYSEC-2026-1109 3.13.3
+aiohttp       3.9.1   PYSEC-2026-1097 3.13.3
+aiohttp       3.9.1   PYSEC-2026-2104 3.14.0
+aiohttp       3.9.1   PYSEC-2026-2103 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2112 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2111 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2113 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2102 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2110 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2109 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2108 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2105 3.14.0
+aiohttp       3.9.1   PYSEC-2026-2098 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2096 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2101 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2095 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2106 3.14.0
+aiohttp       3.9.1   PYSEC-2026-2100 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2097 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2107 3.14.1
+aiohttp       3.9.1   PYSEC-2026-2099 3.13.4
+aiohttp       3.9.1   PYSEC-2026-2094 3.13.4
+pytest        8.4.2   PYSEC-2026-1845 9.0.3
+protobuf      4.25.9  PYSEC-2026-1805 5.29.6,6.33.5
+starlette     0.27.0  PYSEC-2026-161  1.0.1
+starlette     0.27.0  PYSEC-2026-161  1.0.1
+starlette     0.27.0  PYSEC-2026-248  1.3.0
+starlette     0.27.0  PYSEC-2026-249  1.3.1
+starlette     0.27.0  PYSEC-2026-248  1.3.0
+starlette     0.27.0  PYSEC-2026-1943 0.40.0
+starlette     0.27.0  PYSEC-2026-1941 0.47.2
+starlette     0.27.0  PYSEC-2026-2281 1.1.0
+starlette     0.27.0  PYSEC-2026-2280 1.1.0
+transformers  4.57.6  PYSEC-2025-217
+transformers  4.57.6  PYSEC-2026-2290
+transformers  4.57.6  PYSEC-2026-2288 5.0.0
+transformers  4.57.6  PYSEC-2026-2289 5.3.0
+transformers  4.57.6  PYSEC-2026-2290 5.5.0

@@ -95,6 +95,73 @@ jobs:
         # the committed .env.local used to bake a dead host into the bundle.
         run: npm run build
 
+  dependencies:
+    name: Dependency advisories (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # DELIBERATELY NON-BLOCKING, and the reason matters.
+    #
+    # SECURITY.md listed "no automated dependency-vulnerability scanning" as an
+    # open gap. This closes it in the only way that is honest here: the reports
+    # are produced on every push and uploaded as artifacts, so a human always has
+    # current numbers — but the job does not fail the build.
+    #
+    # Why not gate on it: both trees currently carry known advisories that cannot
+    # be fixed in range (`next` is already the newest 14.x; the Python pins are
+    # frozen pending owner approval — see SECURITY.md and HANDOFF open issues 4
+    # and 9). Gating would mean CI is red until an approved dependency upgrade
+    # lands, and would then go red again whenever an upstream advisory is
+    # published against a pinned version — a failure with no code change behind
+    # it, which trains people to ignore CI.
+    #
+    # So: this step INFORMS, it does not gate. Do not read a green tick here as
+    # "no advisories". Read the report.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Audit Python dependencies (pip-audit)
+        run: |
+          set -uo pipefail
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          # pip-audit exits non-zero when it finds anything, which is the whole
+          # point of the report — so the exit code is captured, not propagated.
+          pip-audit -r requirements.txt --progress-spinner=off \
+            | tee pip-audit.txt || true
+          echo "### Python dependencies" >> "$GITHUB_STEP_SUMMARY"
+          head -1 pip-audit.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Audit frontend dependencies (npm audit)
+        working-directory: frontend
+        run: |
+          set -uo pipefail
+          npm ci
+          npm audit 2>&1 | tee ../npm-audit.txt || true
+          echo "### Frontend dependencies" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "vulnerabilities" ../npm-audit.txt | tail -1 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload advisory reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-advisories
+          path: |
+            pip-audit.txt
+            npm-audit.txt
+          if-no-files-found: warn
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
