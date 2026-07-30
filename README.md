@@ -76,7 +76,7 @@ approximations says so.
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14 (App Router), TypeScript, Tailwind, Framer Motion, Monaco Editor |
+| Frontend | Next.js 16 (App Router), TypeScript, Tailwind, Framer Motion, Monaco Editor |
 | Backend | FastAPI, Python 3.11, async throughout |
 | AI Engine | Groq (Llama 3.3 70B / 3.1 8B — severity + telemetry-routed), swap point marked for GPT-5.6 |
 | Vector Store | In-process CWE/OWASP RAG store |

@@ -98,25 +98,51 @@ These are real and should be treated as open:
 - **Docker images do not build**, so the non-root user and reduced attack surface
   described in `backend/Dockerfile` are not in effect anywhere. Blocked on
   container-registry access; see `docs/audit-evidence/t2/registry-egress-block.txt`.
-- **18 open advisories in the frontend dependency tree** (16 high, 2 moderate),
-  all in `next` and in the `postcss` nested inside it. `next` resolves to
-  **14.2.35 — the latest 14.x — so there is no in-range fix**; the only remedy is
-  a breaking upgrade to `next@16`, which needs owner approval and its own
-  verification pass, so nothing has been changed.
+- **14 open advisories in the frontend dependency tree** (12 high, 2 moderate),
+  down from 18 after the approved `next` 14 → 16 upgrade. **None of them is in
+  Next.js's own code any more.** `next` carried **21 distinct advisories** at
+  14.2.35 — the latest 14.x, so there was no in-range fix — and now carries
+  **zero**; it appears in the report only because of packages below it in the
+  tree. Evidence, including the full list of 21 and the measured proof that the
+  app behaves identically: `docs/audit-evidence/t2/dep-step3-nextjs.txt`.
 
-  Triaged rather than counted, because the raw number overstates the exposure.
-  Verified absent from this app: `middleware.*`, any `"use server"` directive,
-  i18n config, rewrites, and a Pages Router — and all five routes build as fully
-  prerendered static. That structurally excludes the four Server-Action/Server-
-  Function advisories and the two Pages-Router/rewrite ones. The three `postcss`
-  advisories need attacker-controlled CSS *source* at build time, and the app's
-  own top-level `postcss` (8.5.19) is already patched. What remains genuinely
-  applicable is the response/RSC **cache-confusion** class (GHSA-wfc6-r584-vfw7,
-  GHSA-68g3-v927-f742, GHSA-4633-3j49-mh5q), against a static frontend that
-  serves no user-specific responses.
+  What remains, triaged rather than counted:
 
-  Full per-advisory reasoning and the raw `npm audit` output:
+  - **`sharp` <0.35.0 (high, 4 inherited libvips CVEs).** This is a **new
+    exposure that the upgrade introduced** — Next 16 depends on `sharp` for
+    image optimization where Next 14 used a bundled wasm path. There is no
+    in-range fix (`npm audit fix --force` "resolves" it by downgrading `next` to
+    9.3.3). It is not invoked here: the app renders no `next/image` and no remote
+    images, so the optimizer never processes one. That is a fact about this
+    app's current shape, not a clean bill of health for `sharp` — adding a single
+    `next/image` would make it reachable.
+  - **Nine ESLint-toolchain packages (high).** `eslint`, `eslint-config-next`,
+    `eslint-plugin-*`, `minimatch`, `brace-expansion`, `@eslint/*` — a
+    brace-expansion DoS reached through glob matching. These were **already
+    present before the upgrade** and are lint-time only; none reaches shipped
+    code.
+  - **`postcss` <=8.5.17 (high, 3 advisories), nested inside `next`.** Needs
+    attacker-controlled CSS *source* at build time. The app's own top-level
+    `postcss` (8.5.19) is patched.
+  - **`monaco-editor` → `dompurify` (moderate).** Pre-existing, editor-only.
+
+  `npm audit fix` without `--force` now clears nothing further, so 14 is the
+  floor without another breaking change.
+
+  Earlier per-advisory reasoning for the Next 14 tree is retained in
   `docs/audit-evidence/t2/frontend-dependency-advisories.txt`.
+
+- **Seven ESLint findings are demoted to warnings**, not fixed. The ESLint 9
+  flat-config migration that `next@16` forced brought much newer
+  `eslint-plugin-react-hooks` and `@next/eslint-plugin-next` rule sets, and four
+  rules that did not exist under the old config now fire on pre-existing code:
+  `react-hooks/set-state-in-effect` (×4), `react-hooks/refs`,
+  `react-hooks/immutability`, and `@next/next/no-html-link-for-pages`. They are
+  demoted rather than suppressed — no `eslint-disable` anywhere, still printed on
+  every lint run and in CI output — with the reasoning in
+  `frontend/eslint.config.mjs`. Two are genuine minor defects that predate all of
+  this: a bare `<a href="/">` to an internal route (full page reload instead of
+  client-side navigation) and a ref assigned during render.
 
 ## Dependencies
 
@@ -133,12 +159,13 @@ again.
 **Dependency scanning also runs in CI** on every push — `pip-audit` against
 `requirements.txt` and `npm audit` against `frontend/package-lock.json`, with
 both reports uploaded as build artifacts. It is deliberately **report-only and
-does not gate the build**: both trees carry known advisories with no in-range
-fix (`next` is already the newest 14.x; the Python pins are frozen pending owner
-approval), so gating would leave CI red until an approved upgrade lands and would
-go red again on any upstream publication against a pinned version — a failure
-with no code change behind it. **Do not read a green tick on that job as "no
-advisories" — read the report.**
+does not gate the build**: both trees still carry known advisories with no
+in-range fix even after the three approved upgrades (`sharp` and the ESLint
+toolchain on the frontend; `transformers` via the unimportable
+`sentence-transformers` on the backend), so gating would leave CI red with no
+code change available to fix it, and would go red again on any upstream
+publication against a pinned version. **Do not read a green tick on that job as
+"no advisories" — read the report.**
 
 ### Python dependency advisories — 56 → 8, and the rest triaged
 

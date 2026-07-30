@@ -1016,14 +1016,21 @@ Both artifacts exist on the run — `dependency-advisories` (3,546 bytes) and
 not asserted.
 
 It is **`continue-on-error: true`** and the reason is written into the workflow:
-both trees carry advisories with **no in-range fix** (`next` is already the newest
-14.x; the Python pins are frozen pending approval), so gating would leave CI red
-until an approved upgrade lands, and would go red again on any upstream
-publication against a pinned version — a failure with no code change behind it,
-which trains people to ignore CI. The job informs; it does not gate. A green tick
-there does **not** mean "no advisories".
+both trees still carry advisories with **no in-range fix**, even after the three
+approved upgrades — `sharp` and the ESLint toolchain on the frontend,
+`transformers` (via the unimportable `sentence-transformers`) on the backend. So
+gating would leave CI red with no code change available to fix it, and would go
+red again on any upstream publication against a pinned version — a failure with
+no code change behind it, which trains people to ignore CI. The job informs; it
+does not gate. A green tick there does **not** mean "no advisories".
 
-### Frontend dependency advisories — found, triaged, NOT actioned
+### Frontend dependency advisories — found and triaged
+
+> **Superseded by step 3 below.** This section records the state at the time of
+> the audit, when nothing had been approved. `next` is now **16.2.12** and
+> carries **zero advisories of its own**; the current picture is in
+> "Step 3 — Next.js 14 → 16" and in SECURITY.md. Kept because the triage
+> reasoning is still the record of *why* the upgrade was worth requesting.
 
 18 advisories (16 high, 2 moderate) in `next` and its nested `postcss`. `next`
 resolves to **14.2.35, the latest 14.x — no in-range fix exists**; the only
@@ -1042,6 +1049,220 @@ responses.
 **Not changed** — §13.1 forbids dependency changes without approval. Recorded in
 SECURITY.md and as open issue 9. Evidence:
 `docs/audit-evidence/t2/frontend-dependency-advisories.txt`.
+
+---
+
+## APPROVED DEPENDENCY MAINTENANCE (owner-approved, in the given order)
+
+Advisories against `requirements.txt`: **56 → 18 → 8** (steps 1–2).
+Advisory *packages* in `frontend/package-lock.json`: **18 → 14**, and the 21
+advisories against `next`'s own code → **0** (step 3).
+
+### Step 1 — the `aiohttp` pin (`55227ff`, CI run 40 green)
+
+**Correcting my own recommendation.** I proposed "drop aiohttp, nothing imports
+it". The first half holds; the second was incomplete. aiohttp is **not
+removable** — it arrives transitively:
+
+```
+chromadb -> kubernetes -> aiohttp<4.0.0,>=3.9.0
+```
+
+So the direct pin could never have removed the package. What it did was hold a
+dependency DevGuard never calls at the **oldest** version satisfying kubernetes's
+range — which is why one line carried **30 of the 56** advisories.
+
+Proven unused: no `.py` file imports it, it is absent from `sys.modules` after
+`import backend.main`, and `chromadb` is itself unimportable
+(`np.float_` removed in NumPy 2.0), so nothing running can reach it.
+
+Dropping the pin lets the resolver satisfy kubernetes itself; `pip install
+--dry-run` picks **3.14.3**, above every fix version. Left **unpinned** on
+purpose — a transitive dependency we do not call should be governed by its own
+parent's range, and a fresh pin would recreate the problem the moment a fix lands
+outside it.
+
+### Step 2 — FastAPI / Starlette (`9525a2b`, CI run 41 green, all four jobs)
+
+| | from | to | why it had to move |
+|---|---|---|---|
+| `fastapi` | 0.104.1 | **0.136.0** | 0.104.1 constrains starlette to `<0.28.0` |
+| `starlette` | 0.27.0 | **1.3.1** | the objective; 1.3.1 is the *lowest* version clearing all seven, PYSEC-2026-249 is fixed only there |
+| `pydantic` | 2.5.0 | **2.13.4** | forced — fastapi 0.136.0 requires `>=2.9.0` |
+
+Verified as **not** needing to move: `anyio==3.7.1` (pip resolves it with fastapi
+0.136.0 with no conflict; the pin existed only because 0.104.1 capped it `<4.0.0`)
+and `uvicorn==0.24.0` (does not import starlette).
+
+**A real regression found and avoided.** The obvious move, fastapi 0.141.1
+(latest), **breaks the application**:
+
+```
+AttributeError: '_IncludedRouter' object has no attribute 'path'
+opentelemetry/instrumentation/fastapi/__init__.py:337
+GET /slo-status -> HTTP 500        (12 of 301 tests failed)
+```
+
+`_IncludedRouter` is defined in **fastapi/routing.py:1586, not starlette** — I
+first read this as a starlette incompatibility and checked, which mattered.
+fastapi 0.141.1 puts one into `app.routes` on `include_router()` (called twice in
+`backend/main.py`), and `opentelemetry-instrumentation-fastapi==0.41b0` reads
+`.path` off every route. Confirmed not-starlette by testing 0.141.1 against
+starlette 0.47.2 — identical error, identical 500.
+
+Bisected by reading each wheel's own `routing.py` and `METADATA`:
+
+```
+fastapi 0.115.6   _IncludedRouter=False   starlette<0.42.0,>=0.40.0
+fastapi 0.128.0   _IncludedRouter=False   starlette<0.51.0,>=0.40.0
+fastapi 0.136.0   _IncludedRouter=False   starlette>=0.46.0      <- chosen
+fastapi 0.141.1   _IncludedRouter=True    starlette>=0.46.0      <- breaks OTel
+```
+
+0.136.0 is the newest release without `_IncludedRouter` that still allows
+starlette unbounded, so it reaches 1.3.1 **without** dragging the five
+`opentelemetry-*` pins along — which was not approved and would risk
+`verify_otel.py`, the project's central verification artifact, in the same commit.
+`requirements.txt` carries a comment so the next person to bump fastapi knows they
+must upgrade the OTel instrumentation with it.
+
+`starlette` is now pinned **explicitly**: under 0.104.1 it was pinned by proxy
+(`<0.28.0`), but 0.136.0 asks only `>=0.46.0` unbounded, which would let the
+package carrying the advisories drift on any fresh install.
+
+**Behaviour verified identical**: 301 tests, keyless import OK,
+`scripts/verify_otel.py` PASSED against decoded protobuf, `doctor.py` exit 0, all
+four GETs and all five god-mode POSTs 200, `WS /ws/scan/{id}` handshake returning
+`{"status": "subscribed"}`, and the error contract intact despite starlette 1.x
+internals (oversized body → 422 not 500, unknown scan_id → 404). A **fresh venv**
+install of the new `requirements.txt` exits 0 and resolves exactly the tested set.
+
+Evidence: `docs/audit-evidence/t2/dep-step1-aiohttp.txt`,
+`docs/audit-evidence/t2/dep-step2-fastapi-starlette.txt`.
+
+### Step 3 — Next.js 14 → 16 (`next@16.2.12`)
+
+**Why it was necessary, stated precisely.** `next` was at **14.2.35 — the latest
+14.x**, so no in-range fix existed, and `npm audit fix` offers only
+`--force`, which "will install next@9.3.3, which is a breaking change" — a
+four-major **downgrade**. Counted per advisory rather than per package, `next`
+carried **21 distinct advisories** in its own code. It now carries **zero**.
+
+**Research done before touching anything.** `next@16` peer-accepts
+`react: ^18.2.0 || ^19.0.0`, so there is **no forced React 19 upgrade** — and
+`framer-motion`, `@monaco-editor/react`, `react-countup` and `lucide-react` all
+accept React 18 too. React stays at `^18.3.1`. `next@16.2.12` needs
+`node >=20.9.0`; CI pins `node-version: "20"`, which setup-node resolves to the
+latest 20.x, so **no CI change was needed**.
+
+**The change, four lines plus a config migration.** `next` and
+`eslint-config-next` → `16.2.12`, `eslint` → `^9.39.0`, and `"lint": "next lint"`
+→ `"lint": "eslint ."`. **No application source file was touched** —
+`git diff --stat -- frontend/app frontend/components frontend/lib` is empty.
+
+**Two breaking changes were hit, and neither is optional:**
+
+1. **`next lint` was removed in Next 16.** It parses its argument as a directory
+   now: `npx next lint` → *"Invalid project directory provided, no such
+   directory: .../frontend/lint"*. That broke `npm run lint`, the first step of
+   the CI frontend job. Fixed by calling the ESLint CLI directly.
+2. **`eslint-config-next@16` requires ESLint ≥ 9, which reads flat config.**
+   `.eslintrc.json` (`{"extends": "next/core-web-vitals"}`) deleted, replaced by
+   `frontend/eslint.config.mjs` spreading the same preset. Same rule set, new
+   file format. The flat file also needs `ignores`, because `eslint .` walks the
+   whole tree where `next lint` scoped itself to the app directories.
+
+**Consequence, and the one thing left unfixed.** ESLint 9 brings much newer
+`eslint-plugin-react-hooks` / `@next/eslint-plugin-next`, and **four rules that
+did not exist under the old config** fire on pre-existing code: 8 problems on
+first run. These are **not** regressions from the upgrade. Seven are demoted to
+`warn` in `eslint.config.mjs` with the reasoning in the file — not silenced, no
+`eslint-disable`, still printed in CI output. Fixing seven UI call sites inside a
+dependency commit would violate both "smallest possible modification" and "verify
+the application behaves identically". **Follow-up work, tracked as open issue 10:**
+
+| Rule | Sites | Judgement |
+|---|---|---|
+| `react-hooks/set-state-in-effect` | `app/page.tsx:54`, `:68`, `app/result/page.tsx:378`, `app/scanner/page.tsx:143` | Cascading-render style, not defects |
+| `react-hooks/refs` | `app/page.tsx:61` | **Real anti-pattern** — `doneRef.current = onDone` during render. Benign here |
+| `react-hooks/immutability` | `app/result/page.tsx:340` | Style |
+| `@next/next/no-html-link-for-pages` | `app/result/page.tsx:287` | **Real minor defect** — bare `<a href="/">` to an internal route does a full page reload instead of client-side navigation. Predates all of this |
+
+The eighth was `import/no-anonymous-default-export` on the config file I had just
+written; fixed properly by naming the exported array.
+
+**Files Next rewrote by itself.** `next build` edits `tsconfig.json`
+(`"jsx": "preserve"` → `"react-jsx"`, `include` += `.next/dev/types/**/*.ts`,
+plus JSON re-formatting) and `next-env.d.ts` (`import "./.next/types/routes.d.ts"`
+for typed routes). Committed as Next wrote them — reverting leaves the tree
+permanently dirty since the next build rewrites it. **Ordering hazard checked,
+not assumed:** CI typechecks *before* building, so `.next/` does not exist when
+`next-env.d.ts` references it. Measured with `.next` moved out of the tree
+entirely — `npx tsc --noEmit` exits **0**, and even with `--skipLibCheck false`
+there is no error on `next-env.d.ts` or `routes.d.ts`.
+
+**Verification gate, all re-run from a clean `npm ci` against the committed
+lockfile with `.next/` deleted** — exactly CI's state:
+
+| Check | Result |
+|---|---|
+| `npm ci` | EXIT 0 |
+| `npx next --version` | Next.js v16.2.12 |
+| `npm run lint` | EXIT 0 — 0 errors, 7 warnings |
+| `npx tsc --noEmit` | EXIT 0 |
+| `npm run build` | EXIT 0 — all 5 routes still `○` prerendered static |
+| `python -m pytest` | **301 passed** (frontend-only change; unaffected, and confirmed so) |
+
+**"Behaves identically" was measured, not asserted.** Both versions were actually
+run: Next 16 built and served on `:3111`, then the tree reverted to the committed
+Next 14 state, `npm ci` against the **old** lockfile, rebuilt, served on `:3112`,
+and the same routes captured from both. Raw HTML cannot be diffed (chunk
+filenames are content-hashed), so scripts/styles/comments/tags were stripped and
+the remaining visible text nodes compared:
+
+| Route | HTTP | Next 14 | Next 16 | Visible text identical? |
+|---|---|---|---|---|
+| `/` | 200 | 17,780 B | 19,911 B | **yes** (40 = 40 nodes) |
+| `/scanner` | 200 | 9,005 B | 11,158 B | **yes** (27 = 27) |
+| `/result` | 200 | 6,119 B | 8,149 B | **yes** (3 = 3) |
+| `/nexus` | 200 | 18,078 B | 20,222 B | **yes** (77 = 77) |
+
+Byte-for-byte identical rendered text on all four. The byte deltas are entirely
+in Next 16's larger script preamble (runtime/route manifests), not in content.
+
+**Advisories: 18 → 14 packages, and 21 → 0 on `next` itself.** The headline
+number understates it, because `npm audit` counts packages. Six ESLint-8-era
+transitive packages left the list; **two joined, and one of those is a genuine new
+exposure that is not being hidden**:
+
+* **`sharp` <0.35.0 (high, 4 inherited libvips CVEs) — NEW.** Next 16 depends on
+  `sharp` for image optimization where Next 14 used a bundled wasm path. No
+  in-range fix. Not invoked here: the app renders no `next/image` and no remote
+  images (`grep -rn "next/image" frontend/app frontend/components` finds
+  nothing), so the optimizer never processes one. That is a fact about this app's
+  shape today, **not** a clean bill of health — one `next/image` makes it
+  reachable.
+* `@eslint/config-array` — the ESLint 9 replacement for
+  `@humanwhocodes/config-array`, which left in the same move. Same underlying
+  brace-expansion DoS, new name. Lint-time only.
+
+The nine ESLint-toolchain advisories were **already present before** the upgrade.
+`npm audit fix` without `--force` now clears **nothing** further, so 14 is the
+floor without another breaking change.
+
+**A stale tooling floor the upgrade invalidated.** `scripts/doctor.py` had
+`MIN_NODE_MAJOR = 18`, but `next@16.2.12` declares `engines: {node: ">=20.9.0"}`
+and refuses to build below it — so doctor would have reported `OK Node.js v18.x`
+on a machine where `npm run build` cannot work. Raised to `MIN_NODE = (20, 9)`,
+checked on **major and minor** (20.0–20.8 are also below Next's range). Nothing in
+CI fails on this, because the runners are on Node 20+; that is exactly why it was
+easy to miss. CI itself needed no change — both `setup-node` steps request
+`node-version: "20"`, which resolves to the newest 20.x — and now carries a
+comment saying not to lower it.
+
+**No functional regression was found.** The two breaking changes above were
+tooling-only and handled inside the approved scope with no application-code
+edits. Evidence: `docs/audit-evidence/t2/dep-step3-nextjs.txt`.
 
 ---
 
@@ -1097,8 +1318,9 @@ finding.
    correct patches. That also gates the benchmark artifact,
    `verify_otel.py --require-agent-spans`, and any measured decision about wiring
    the Pattern-Learning loop.
-3. **Owner approval** — the dependency decisions (open issues 4, 9, 10) and the
-   `signoz-system` gitlink (open issue 5).
+3. **Owner approval** — the remaining dependency decisions (open issues 4 and
+   10c; **9 and 10a/10b are now approved and done**) and the `signoz-system`
+   gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
 
@@ -1258,23 +1480,33 @@ Blocking first:
    hackathon (README says *Agents of SigNoz*, contracts say *Build with
    DataHub*). Note `9651db3` cited in `01_PLATFORM_MASTER.md` does not exist in
    this repo's history.
-10. **Python dependency bumps?** 56 advisories across 7 pinned packages, all
-   unreachable in the current code (triaged per advisory — see above). Three
-   independent decisions: (a) **drop `aiohttp`** — nothing imports it, 30 of the
-   56 advisories, zero functionality lost, and the cheapest win available;
-   (b) **bump `starlette` via a compatible `fastapi`** — the only package in the
-   request path, clearing the multipart class and the `request.url` pair;
-   (c) `protobuf` / `python-dotenv`, low-risk and low-value since neither entry
-   point is called. Each needs the 209 tests, `verify_otel.py` and the five
-   frontend routes re-verified. Evidence:
-   `docs/audit-evidence/t2/python-dependency-advisories.txt`.
-9. **Upgrade `next` 14 → 16?** 18 open advisories (16 high) and `next` is already
-   at the newest 14.x, so there is no in-range fix. Most are structurally
-   unreachable in this app; the response/RSC cache-confusion class is not. A
-   two-major upgrade needs approval and its own verification pass — `tsc`,
-   `next build`, `next lint`, and a manual pass over all five routes. Do not fold
-   it into an unrelated change. Evidence:
-   `docs/audit-evidence/t2/frontend-dependency-advisories.txt`.
+10. ~~**Python dependency bumps?**~~ **APPROVED AND DONE for (a) and (b)** —
+   `aiohttp` pin dropped, `fastapi`/`starlette` moved to a patched pairing.
+   **56 → 8 advisories.** See "APPROVED DEPENDENCY MAINTENANCE" steps 1–2 above.
+   **Still open:** (c) `protobuf` / `python-dotenv` — 1 advisory each, low risk
+   and low value since neither vulnerable entry point (`json_format.ParseDict`,
+   `set_key`/`unset_key`) is ever called. The remaining 5 are `transformers`,
+   which leaves only with `sentence-transformers` — that is open issue 4, not a
+   separate decision. Evidence:
+   `docs/audit-evidence/t2/python-dependency-advisories.txt`,
+   `dep-step1-aiohttp.txt`, `dep-step2-fastapi-starlette.txt`.
+9. ~~**Upgrade `next` 14 → 16?**~~ **APPROVED AND DONE.** `next@16.2.12`; the 21
+   advisories in Next.js's own code are cleared, the tree went 18 → 14 packages,
+   and rendered output is byte-identical to Next 14 on all four routes (both
+   versions actually built and served, then diffed). No React 19 upgrade was
+   needed. Two tooling breaking changes handled: `next lint` removal and the
+   ESLint 9 flat-config migration. See "Step 3 — Next.js 14 → 16" above.
+   Evidence: `docs/audit-evidence/t2/dep-step3-nextjs.txt`.
+11. **Fix the seven demoted ESLint findings?** Introduced as *visible* work by
+   the ESLint 9 migration in step 3 — the rules are new, the code is not. Two are
+   genuine minor defects: `@next/next/no-html-link-for-pages` at
+   `app/result/page.tsx:287` (bare `<a href="/">` to an internal route → full page
+   reload instead of client-side navigation) and `react-hooks/refs` at
+   `app/page.tsx:61` (`doneRef.current = onDone` assigned during render). The
+   other five are `set-state-in-effect` / `immutability` style findings. They are
+   `warn`, not suppressed — no `eslint-disable` anywhere. **Promote each rule back
+   to `error` in the same commit that fixes its call sites**, so the config cannot
+   drift away from the code. Deliberately not folded into a dependency commit.
 
 ---
 

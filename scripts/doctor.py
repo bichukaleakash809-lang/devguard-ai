@@ -39,7 +39,14 @@ if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
     GREEN = AMBER = RED = GREY = BOLD = RESET = ""
 
 MIN_PYTHON = (3, 10)
-MIN_NODE_MAJOR = 18
+# Raised 18 -> 20 by the approved next@14 -> next@16 upgrade. This is not a
+# preference: `next@16.2.12` declares `engines = { node: ">=20.9.0" }`, so on Node
+# 18 `next build` refuses to run. Leaving it at 18 would have made doctor report
+# OK on a machine where the frontend cannot be built, which is the one thing this
+# script exists to prevent. The minor floor is checked too, because 20.0-20.8 are
+# also below Next's range.
+MIN_NODE = (20, 9)
+MIN_NODE_MAJOR = MIN_NODE[0]
 
 results: list[tuple[str, str, str, str]] = []  # (status, name, detail, remedy)
 
@@ -74,25 +81,27 @@ def check_python() -> None:
 
 
 def check_node() -> None:
+    floor = f"{MIN_NODE[0]}.{MIN_NODE[1]}"
     node = shutil.which("node")
     if not node:
         warn(
             "Node.js",
             "not found on PATH",
             "Only needed for the frontend. Install Node "
-            f"{MIN_NODE_MAJOR}+ if you want to run the UI.",
+            f"{floor}+ if you want to run the UI.",
         )
         return
     try:
         raw = subprocess.run(
             [node, "--version"], capture_output=True, text=True, timeout=10
         ).stdout.strip()
-        major = int(raw.lstrip("v").split(".")[0])
-        if major >= MIN_NODE_MAJOR:
-            ok("Node.js", f"{raw} (>= {MIN_NODE_MAJOR})")
+        parts = raw.lstrip("v").split(".")
+        got = (int(parts[0]), int(parts[1]))
+        if got >= MIN_NODE:
+            ok("Node.js", f"{raw} (>= {floor})")
         else:
-            warn("Node.js", f"{raw} is older than {MIN_NODE_MAJOR}",
-                 f"Upgrade to Node {MIN_NODE_MAJOR}+ to build the frontend.")
+            warn("Node.js", f"{raw} is older than {floor}",
+                 f"Upgrade to Node {floor}+ — next@16 will not build below it.")
     except Exception as exc:  # noqa: BLE001
         warn("Node.js", f"present but not queryable ({exc})", "")
 
