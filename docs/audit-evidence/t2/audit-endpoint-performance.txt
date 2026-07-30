@@ -1,0 +1,45 @@
+GET /audit-log performance defect — evidence
+Captured: 2026-07-30T01:53:51Z
+
+DEFECT: the paginated endpoint parsed the ENTIRE log to return one page.
+
+    entries = audit.read_all()
+    return {"count": len(entries), "entries": entries[-limit:]}
+
+read_all() json.loads() every record; the slice then discards all but
+`limit`. Synchronous, so it ran on the asyncio event loop.
+
+MEASURED — cost of serving limit=100, by log size:
+
+  log size    BEFORE        AFTER
+  --------    ----------    ---------
+       100      0.463 ms     0.492 ms
+     1 000      3.665 ms     0.692 ms
+    10 000     43.385 ms     3.743 ms
+    50 000    311.091 ms    14.284 ms      21.8x faster
+
+COMPONENT BREAKDOWN at 50 000 entries (15.1 MB file):
+    read_all()        284.543 ms   <- removed from this path
+    count_entries()    13.913 ms   <- byte-counts newlines, no JSON
+    read_tail(100)      0.407 ms   <- parses only the page returned
+
+So the page read itself is 763x faster (311 ms -> 0.407 ms). The residual
+14 ms is entirely the exact total, which the endpoint reports as `count`.
+Stated plainly rather than quoting only the headline number. Both calls now
+run via asyncio.to_thread, so neither blocks the event loop.
+
+CORRECTNESS — read_tail(n) must equal read_all()[-n:] exactly:
+    read_tail(   1) == read_all()[-1:]  -> True
+    read_tail(   5) == read_all()[-5:]  -> True
+    read_tail(  50) == read_all()[-50:]  -> True
+    read_tail( 100) == read_all()[-100:]  -> True
+    read_tail( 999) == read_all()[-999:]  -> True
+    read_tail(1000) == read_all()[-1000:]  -> True
+
+ENDPOINT verified against the real committed log (35 entries):
+    GET /audit-log?limit=3      -> count=35, entries=3, correct shape
+    GET /audit-log?limit=10000  -> count=35, entries=35
+    GET /audit-log?limit=0      -> HTTP 400 (guard intact)
+    GET /audit-log/verify       -> chain intact, 35 entries
+
+Tests: .....................................                                    [100%]

@@ -255,6 +255,107 @@ def test_appending_to_a_large_log_keeps_the_chain_intact(chain, anyio_backend):
     assert report["entries_checked"] == 300
 
 
+# --------------------------------------------------------------------------- #
+# read_tail / count_entries — the paginated read path
+# --------------------------------------------------------------------------- #
+
+def _seed(path, n):
+    prev = audit.GENESIS_PREV_HASH
+    with open(path, "w") as fh:
+        for i in range(n):
+            e = {
+                "scan_id": f"s{i}",
+                "timestamp": 1.0,
+                "code_hash": "a" * 64,
+                "verdict": "pass",
+                "prev_hash": prev,
+            }
+            e["entry_hash"] = audit._hash_entry(e)
+            fh.write(json.dumps(e) + "\n")
+            prev = e["entry_hash"]
+
+
+@pytest.mark.parametrize("limit", [1, 2, 5, 50, 99, 100])
+def test_read_tail_matches_read_all_slice(chain, limit):
+    """The invariant: read_tail(n) must equal read_all()[-n:], exactly.
+
+    This is what makes it a safe substitution in the endpoint — same records,
+    same order, without parsing the whole log.
+    """
+    _seed(chain, 300)
+    assert audit.read_tail(limit) == audit.read_all()[-limit:]
+
+
+def test_read_tail_returns_oldest_first(chain):
+    _seed(chain, 50)
+    ids = [e["scan_id"] for e in audit.read_tail(3)]
+    assert ids == ["s47", "s48", "s49"]
+
+
+def test_read_tail_limit_exceeding_the_log_returns_everything(chain):
+    _seed(chain, 7)
+    got = audit.read_tail(500)
+    assert len(got) == 7
+    assert got == audit.read_all()
+
+
+def test_read_tail_with_a_limit_of_exactly_the_log_size(chain):
+    """Boundary: the window must cover the first record too, not drop it as a
+    partial leading line."""
+    _seed(chain, 12)
+    got = audit.read_tail(12)
+    assert len(got) == 12
+    assert got[0]["scan_id"] == "s0"
+
+
+@pytest.mark.parametrize("limit", [0, -1, -100])
+def test_read_tail_rejects_non_positive_limits(chain, limit):
+    _seed(chain, 10)
+    assert audit.read_tail(limit) == []
+
+
+def test_read_tail_on_a_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "AUDIT_LOG_PATH", str(tmp_path / "nope.jsonl"))
+    assert audit.read_tail(10) == []
+
+
+def test_read_tail_on_an_empty_file(chain):
+    chain.write_text("")
+    assert audit.read_tail(10) == []
+
+
+def test_read_tail_grows_its_window_across_many_chunks(chain, monkeypatch):
+    """With a tiny starting window the backward walk must keep expanding.
+
+    This is the path that would silently return too few records if the growth
+    loop were wrong.
+    """
+    monkeypatch.setattr(audit, "_TAIL_CHUNK_BYTES", 8)
+    _seed(chain, 200)
+    assert audit.read_tail(60) == audit.read_all()[-60:]
+
+
+def test_read_tail_skips_an_unparseable_record_without_raising(chain):
+    _seed(chain, 20)
+    with open(chain, "a") as fh:
+        fh.write("{ this is not json\n")
+    got = audit.read_tail(5)
+    # The corrupt record is dropped; the good ones still come back.
+    assert all("scan_id" in e for e in got)
+    assert len(got) == 4
+
+
+def test_count_entries_matches_read_all_length(chain):
+    for n in (0, 1, 13, 500):
+        _seed(chain, n)
+        assert audit.count_entries() == n == len(audit.read_all())
+
+
+def test_count_entries_on_a_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "AUDIT_LOG_PATH", str(tmp_path / "nope.jsonl"))
+    assert audit.count_entries() == 0
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
