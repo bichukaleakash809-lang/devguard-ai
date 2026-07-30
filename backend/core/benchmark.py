@@ -25,9 +25,12 @@ honest than "did it find *anything*".
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from backend.core.ai_agent import run_scanner
 from backend.core.schemas import AgentExecutionError, BenchmarkReport
+
+logger = logging.getLogger("devguard.benchmark")
 
 # ---------------------------------------------------------------------------
 # Labeled corpus — realistic OWASP-style snippets with known CWE labels.
@@ -130,14 +133,20 @@ async def run_benchmark(concurrency: int = 4) -> BenchmarkReport:
 
     async def _scan_one(item: dict) -> dict:
         async with sem:
+            errored = False
             try:
                 result = await run_scanner(item["code"])
                 found = {v.cwe_id for v in result.vulnerabilities}
                 confidences = {
                     v.cwe_id: v.confidence_score for v in result.vulnerabilities
                 }
-            except AgentExecutionError:
-                found, confidences = set(), {}
+            except AgentExecutionError as exc:
+                # Recorded as errored, NOT as "the Scanner found nothing". Those
+                # are different facts: the second is a detection miss, the first
+                # is an infrastructure failure. Collapsing them lets an outage
+                # publish itself as a poor recall figure.
+                logger.warning("benchmark: scan failed for %s: %s", item["id"], exc)
+                found, confidences, errored = set(), {}, True
 
             expected: set[str] = item["expected_cwes"]
             tp = found & expected
@@ -145,6 +154,7 @@ async def run_benchmark(concurrency: int = 4) -> BenchmarkReport:
             fn = expected - found
             return {
                 "id": item["id"],
+                "errored": errored,
                 "expected": sorted(expected),
                 "found": sorted(found),
                 "tp": sorted(tp),
@@ -154,6 +164,15 @@ async def run_benchmark(concurrency: int = 4) -> BenchmarkReport:
             }
 
     per_snippet = await asyncio.gather(*[_scan_one(i) for i in BENCHMARK_SET])
+
+    errored_count = sum(1 for s in per_snippet if s["errored"])
+    if errored_count:
+        logger.warning(
+            "benchmark: %d/%d snippet(s) errored — the metrics below are "
+            "computed over a DEGRADED run and understate detection quality.",
+            errored_count,
+            len(per_snippet),
+        )
 
     total_tp = sum(len(s["tp"]) for s in per_snippet)
     total_fp = sum(len(s["fp"]) for s in per_snippet)
@@ -184,6 +203,7 @@ async def run_benchmark(concurrency: int = 4) -> BenchmarkReport:
 
     return BenchmarkReport(
         total_snippets=len(BENCHMARK_SET),
+        errored_snippets=errored_count,
         true_positives=total_tp,
         false_positives=total_fp,
         false_negatives=total_fn,

@@ -273,6 +273,12 @@ class BenchmarkReport(BaseModel):
     ask "what's your FP rate?" — so we surface it as a first-class field.
     """
     total_snippets: int
+    # LAW 6: a figure must not conflate two different facts. A snippet whose
+    # scan RAISED is not the same as a snippet where the Scanner correctly found
+    # nothing, but both used to land in false_negatives identically — so an API
+    # outage published itself as poor detection quality with no way to tell.
+    # `errored_snippets` makes a degraded run visibly degraded.
+    errored_snippets: int = 0
     true_positives: int
     false_positives: int
     false_negatives: int

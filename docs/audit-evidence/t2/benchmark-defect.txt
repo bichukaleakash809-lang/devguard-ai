@@ -1,0 +1,22 @@
+Benchmark measurement defect — evidence
+Captured: 2026-07-30T00:27:33Z
+
+DEFECT: a scan that RAISED was recorded identically to a scan that
+correctly found nothing. Both produced found=set(), so an API outage
+published itself as poor recall with nothing in the report to say so.
+
+SIMULATED PARTIAL OUTAGE (3 of 14 snippets raise, rest detect perfectly):
+  total_snippets     = 14
+  errored_snippets   = 3   <-- NEW: the run is visibly degraded
+  recall             = 0.7692
+  false_negatives    = 3
+  errored ids        = ['sqli_fstring', 'xss_reflected', 'cmd_injection']
+
+Before this change the same run reported recall/false_negatives identically
+but errored_snippets did not exist — so the depressed recall was
+indistinguishable from genuinely poor detection.
+
+NEGATIVE CONTROL still correctly NOT counted as an error:
+  all scans return no findings -> errored_snippets = 0 (correct: finding nothing is not an error)
+
+Test suite: 102 passed, 1 warning in 28.59s
