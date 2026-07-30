@@ -10,9 +10,10 @@ An autonomous, self-healing AI security pipeline that scans code for vulnerabili
 > an **in-process** telemetry shadow, not SigNoz. The MCP client that would query
 > SigNoz itself has never completed a round trip against a real server, so
 > "queries its own SigNoz telemetry via MCP" is a design, not a demonstrated
-> capability — see [Limitations](#limitations) and `docs/MCP_DECISION.md`. Every
-> adaptation described below does fire, and is labelled with its real data
-> source in the API response and the UI.
+> capability — see [Limitations](#limitations) and `docs/MCP_DECISION.md`.
+> **Three of the four loops below fire; the Pattern-Learning Agent does not** (its
+> row says why). The three that do are labelled with their real data source in the
+> API response and the UI.
 
 Built for the [Agents of SigNoz](https://www.wemakedevs.org/hackathons/signoz) hackathon (OpenAI Agent Builder + SigNoz Observability tracks).
 
