@@ -1140,7 +1140,7 @@ install of the new `requirements.txt` exits 0 and resolves exactly the tested se
 Evidence: `docs/audit-evidence/t2/dep-step1-aiohttp.txt`,
 `docs/audit-evidence/t2/dep-step2-fastapi-starlette.txt`.
 
-### Step 3 — Next.js 14 → 16 (`next@16.2.12`)
+### Step 3 — Next.js 14 → 16 (`e9256fb`, CI run 42 green, all four jobs)
 
 **Why it was necessary, stated precisely.** `next` was at **14.2.35 — the latest
 14.x**, so no in-range fix existed, and `npm audit fix` offers only
@@ -1259,6 +1259,12 @@ CI fails on this, because the runners are on Node 20+; that is exactly why it wa
 easy to miss. CI itself needed no change — both `setup-node` steps request
 `node-version: "20"`, which resolves to the newest 20.x — and now carries a
 comment saying not to lower it.
+
+**Verified on GitHub, run 42 (`e9256fb`).** All four jobs green. The frontend
+job's own steps each succeeded on the migrated config — Install (`npm ci`, 14 s),
+**Lint** (4 s), **Typecheck** (4 s), **Build** (10 s) — which is the part that
+mattered, since `next lint`'s removal had broken that job's first step. Backend
+green too (tests 30 s, `verify_otel.py` 7 s, `doctor.py` with the new Node floor).
 
 **No functional regression was found.** The two breaking changes above were
 tooling-only and handled inside the approved scope with no application-code

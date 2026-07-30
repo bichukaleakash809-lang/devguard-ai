@@ -415,4 +415,30 @@ immediately and report before continuing"), stated explicitly:
   seven ESLint findings demoted to warnings, two of which are genuine minor
   defects worth fixing in their own commit.
 
+--------------------------------------------------------------------------------
+10. CI VERIFICATION ON GITHUB — run 42, commit e9256fb
+--------------------------------------------------------------------------------
+
+All four jobs green.
+
+    Frontend — lint, typecheck, build        success
+        Install dependencies (npm ci)        success   14 s
+        Lint                                 success    4 s
+        Typecheck                            success    4 s
+        Build                                success   10 s
+    Backend — import, tests, OTLP verify     success
+        Backend must import without a key    success
+        Preflight (make doctor)              success          <- new Node floor
+        Tests                                success   30 s
+        Verify OTLP export / trace / logs    success    7 s
+    Dependency advisories (report-only)      success
+    Secret scan                              success
+
+The frontend job is the one that mattered here: `next lint`'s removal had broken
+its FIRST step, and the flat-config migration is what makes it pass. All three
+of lint, typecheck and build are green on a runner that had never seen this
+config.
+
+    https://github.com/akashbichukale111/devguard-ai/actions/runs/30544342716
+
 ================================================================================
