@@ -29,7 +29,7 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed** (failed open on casing variance), **the human-in-the-loop approval gate fixed** (never opened at all), **the audit trail now records a real verdict** (35/35 entries said `unknown`). Both dependency trees audited for the first time and triaged per advisory; CI now scans on every push (report-only). No dependency changed — open issues 9 and 10 need approval. |
-| 6 | Test coverage | 58 → 277, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 286, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 277 passing**, all with no API key, no collector, no network.
+**Test inventory — 286 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -269,6 +269,8 @@ false-negative risk is real and stated.
 - `test_local_cost_shadow.py` (14) — the budget-gating total uses exact
   provider costs, prices through the single shared table, and reports when any
   part of a window was approximated
+- `test_self_observation_loops.py` (9) — which of the four advertised loops are
+  actually wired, so the README's differentiator table cannot drift from the code
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -528,6 +530,44 @@ missing `created_at` is never discarded — no pending human decision is thrown
 away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
+
+### One of the four advertised self-observation loops does not fire
+
+The README presents four self-observation loops as a table of working behaviour,
+and that table is the project's headline differentiator. **Three fire. The
+Pattern-Learning Agent does not**, for two independent reasons:
+
+1. **It is not wired into the scan pipeline.** `ai_agent.py` imports
+   `suggest_context_k` with `# noqa: F401 (kept imported; see run_pipeline note on
+   why it's not called yet)`. `run_pipeline` calls `run_scanner(code)` with no
+   `k_context`, so retrieval depth is always the default 4, and both return paths
+   hard-code `context_k_adjusted=False`. Its only caller is
+   `god_mode_orchestrator.execute_llm_judge` — a Nexus endpoint the README itself
+   describes as running synthetically.
+
+2. **It could not fire even where it is called.** `suggest_context_k` asks
+   `mcp_client.get_cwe_failure_pattern` per candidate CWE, and that query has **no
+   local fallback** — unlike `get_recent_cost_trend`, which falls back to
+   `local_telemetry`. With no verified MCP server it returns
+   `PatternStats(available=False)` every time, so `max_failure_rate` stays 0.0 and
+   the function returns `base_k`. Measured: `suggest_context_k(["CWE-89"],
+   base_k=4)` returns **4**, never the configured `ELEVATED_CONTEXT_K` of 8.
+
+So it is blocked on the same unverified MCP integration as the rest of T2, not
+merely unwired. The logic itself is correct — a separate test injects a fake
+history and confirms it elevates at a 0.9 fail rate and holds at 0.0 — so the
+diagnosis is "blocked", not "broken".
+
+**Deliberately NOT wired up.** Making it fire changes the Scanner's prompt context
+on the main detection path, and whether more context improves or degrades
+detection is exactly what needs a live LLM key to measure (open issue 2). Shipping
+an unmeasurable behaviour change to the most important path would be the wrong
+call. `tests/test_self_observation_loops.py` pins the current state, including a
+test that **fails if someone wires it in** — so that becomes a deliberate, measured
+change with the README updated in the same commit, not a quiet edit.
+
+README corrected: the row now says it does not fire, why, and what was measured.
+**Tests 277 → 286.**
 
 ### The budget-gating cost shadow approximated when exact figures were available
 
@@ -986,7 +1026,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 277 passed
+pytest tests/                                -> 286 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -1024,7 +1064,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 277 passed
+python -m pytest tests/          # expect 286 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 

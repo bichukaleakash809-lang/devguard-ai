@@ -54,11 +54,20 @@ flowchart TD
 | Loop | Telemetry In | Decision Out |
 |---|---|---|
 | **Telemetry-Aware Router** | Recent 30-min LLM spend | Downgrades model tier under cost pressure — **never for `critical` severity**, a hard-coded safety floor. Enforced by parsing through the `Severity` enum and failing safe on anything it cannot parse; 31 tests in `tests/test_adaptive_routing_floor.py`, including that non-critical severities *are* still downgradable so the floor cannot be "fixed" by disabling cost control |
-| **Pattern-Learning Agent** | Historical Validator fail-rate per CWE | Elevates RAG retrieval depth (`k`) for CWE classes with a track record of needing more context |
+| **Pattern-Learning Agent** — ⚠ **does not fire** | Historical Validator fail-rate per CWE | *Would* elevate RAG retrieval depth (`k`) for CWE classes with a track record of needing more context. **It is not wired into the scan pipeline** (`run_pipeline` always retrieves at the default `k=4`), and it could not fire if it were: the CWE-history query has no local fallback, so with no verified SigNoz MCP server it returns "unavailable" and `k` stays at base. Measured: `suggest_context_k(["CWE-89"], base_k=4)` returns **4**, never the configured `ELEVATED_CONTEXT_K` of 8. The logic is correct and tested; the data source is missing. Pinned by `tests/test_self_observation_loops.py` so this row and the code cannot drift apart again. |
 | **Cost Guardian** | Cumulative session spend | Flips a global conservation-mode flag respected by the router |
 | **Postmortem Agent** | The error burst that just tripped the circuit breaker | Writes a 2-3 sentence plain-English root cause the moment the breaker opens |
 
-Every adaptation is: **(a)** returned in the API response as `self_observation`, so a human never has to dig through SigNoz to see it fired, and **(b)** stamped back onto the active span, so it's *also* visible inside SigNoz, right next to the scan it influenced. Fail-safe throughout: if SigNoz/MCP is slow or down, every one of these degrades to "behave exactly as if this layer didn't exist" — telemetry is an optimization, never a dependency the user-facing scan can fail on.
+**Three of the four fire today; the Pattern-Learning Agent does not** — see its row
+above, and `tests/test_self_observation_loops.py`, which pins exactly which loops
+are wired so this table stays honest.
+
+Every adaptation that *does* fire is: **(a)** returned in the API response as `self_observation`, so a human never has to dig through SigNoz to see it fired, and **(b)** stamped back onto the active span, so it's *also* visible inside SigNoz, right next to the scan it influenced. Fail-safe throughout: if SigNoz/MCP is slow or down, every one of these degrades to "behave exactly as if this layer didn't exist" — telemetry is an optimization, never a dependency the user-facing scan can fail on.
+
+The router loop reads spend from `local_telemetry.py`, which records the
+**provider-reported** cost per call and falls back to a chars/4 estimate only when
+the SDK omits usage. `CostTrend.exact` reports which, so a budget decision made on
+approximations says so.
 
 ---
 
@@ -156,7 +165,7 @@ Stated plainly, because a claim a judge can disprove costs more than the feature
   That artifact is the **only** route by which a number reaches the API or the
   UI — nothing is hard-coded at either end, and the harness refuses to write it
   if any scan errored (pass `--allow-errored` to override).
-- **Test coverage is real but partial.** 277 tests run in CI on every push, with
+- **Test coverage is real but partial.** 286 tests run in CI on every push, with
   no API key, no collector and no network: schema contracts, audit chain
   tamper-detection, the paginated audit read, circuit breaker, telemetry
   fail-safety, the prompt-injection boundary, RAG determinism, the benchmark
