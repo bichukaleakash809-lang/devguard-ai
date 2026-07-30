@@ -1,0 +1,252 @@
+================================================================================
+T2 §6.1 AND §6.3 — SIGNOZ STOOD UP, REAL DEVGUARD TRACE STORED AND VISIBLE
+================================================================================
+Captured: 2026-07-30
+
+STATUS: §6.1 DONE. §6.3 DONE except for the two agents that require a live LLM
+key — stated precisely in §7 below rather than glossed.
+
+--------------------------------------------------------------------------------
+1. WHY PLAIN DOCKER COMPOSE, NOT foundryctl — THE CONTRACT SAYS SO
+--------------------------------------------------------------------------------
+
+A previous session recorded that deploying without Foundry would be "a
+deployment-approach change away from the pinned casting.yaml" needing owner
+approval. **That was wrong, and this corrects it.** 01_PLATFORM_MASTER.md §6.1
+already grants the choice, in terms that fit this situation exactly:
+
+    "Stand up SigNoz for real and pin the version. Choose the lightest path that
+     works on the available machine (§3.3) and document it. If the
+     Foundry/`casting.yaml` route is heavy or brittle, a documented plain
+     docker-compose SigNoz is a better judge experience — the criterion rewards
+     a working stack, not an exotic one."
+
+The Foundry route here is not merely brittle, it is unavailable: `foundryctl`
+cannot be installed (install-script host `signoz.io` denied by the egress
+gateway; release archive behind the session's GitHub repo-scope control — see
+registry-egress-root-cause.txt). So no owner action was required; the contract's
+own fallback applies.
+
+NOTHING WAS INVENTED. Every service, image, env var, DSN and config file comes
+from the committed `casting.yaml.lock` — the artifact foundryctl itself
+produced. The four files in signoz/deploy/conf/ are extracted VERBATIM from
+`spec.<component>.spec.config.data` and keep their original filenames, and the
+compose service names are exactly the hostnames those configs already reference
+(`signoz-telemetrystore-clickhouse-0-0`, `signoz-metastore-postgres-0`,
+`signoz-signoz-0`, `signoz-telemetrykeeper-clickhousekeeper-0`). Not one byte of
+SigNoz's own configuration had to be edited.
+
+--------------------------------------------------------------------------------
+2. VERSIONS ARE PINNED (§6.1 requires it; `latest` is not a pin)
+--------------------------------------------------------------------------------
+
+casting.yaml.lock says `latest` for the three SigNoz images. Each was resolved to
+the concrete release tag `latest` pointed at, by comparing manifest digests from
+the registry:
+
+    signoz/signoz                 latest == v0.135.0   sha256:9b0ea7ad6648…
+    signoz/signoz-otel-collector  latest == v0.144.6   sha256:7e4e539a73f1…
+    signoz/signoz-mcp-server      latest == v0.9.0     sha256:75327a2cea4b…
+    clickhouse/clickhouse-server  25.12.5   (already pinned in the lock)
+    clickhouse/clickhouse-keeper  25.12.5   (already pinned in the lock)
+    postgres                      16        (already pinned in the lock)
+
+Independently confirmed by the running server itself:
+
+    $ curl http://127.0.0.1:3301/api/v1/version
+    {"version":"v0.135.0","ee":"Y","setupCompleted":true}
+
+--------------------------------------------------------------------------------
+3. FOUR THINGS THE LOCK FILE DOES NOT TELL YOU
+--------------------------------------------------------------------------------
+
+Each was found by the stack failing, not by reading docs. They are the whole
+reason this took more than a transcription.
+
+(a) THE SCHEMA MIGRATOR IS MISSING FROM THE LOCK ENTIRELY.
+    foundryctl runs migrations internally, so `casting.yaml.lock` never names
+    `signoz/signoz-schema-migrator`. Translate the lock literally and you get a
+    stack that starts clean, reports healthy, and SILENTLY DROPS EVERY SPAN:
+
+        $ SHOW DATABASES
+        INFORMATION_SCHEMA / default / information_schema / system
+        $ SELECT ... FROM signoz_traces.signoz_index_v3
+        Code: 81. DB::Exception: Database signoz_traces does not exist.
+
+    Fixed by adding `signoz-schema-migrator-sync` (and `-async`), pinned to
+    v0.144.6 to match the collector, as a `service_completed_successfully`
+    dependency of BOTH the ingester and the SigNoz app — the app queries those
+    tables too, not just the collector that writes them.
+
+(b) THE COLLECTOR WILL NOT START ITS OTLP RECEIVER UNTIL AN ORG EXISTS.
+    This is the subtle one. signoz-otel-collector fetches its effective pipeline
+    config from the SigNoz server over OpAMP. With no organisation created, the
+    server refuses to register the agent:
+
+        signoz-0:  "failed to find or create agent"
+                   exception.message: "cannot create agent without orgId"
+        ingester:  "Server returned an error response" — every 30s
+
+    The collector nonetheless logs "Everything is ready. Begin running and
+    processing data." and its container is Up. But port 4318 refuses
+    connections, and nothing is ingested. Measured: `curl -X POST
+    http://127.0.0.1:4318/v1/traces` returned HTTP 000 in this state, while the
+    SigNoz UI on 3301 answered 200 the whole time — so it is NOT a port-publishing
+    problem, and "the container is healthy" is not evidence the pipeline works.
+
+    Fixed by ordering: bring up the app, POST /api/v1/register to create the
+    org, THEN start the ingester. After that:
+
+        $ curl -X POST http://127.0.0.1:4318/v1/traces -d '{}'
+        {"partialSuccess":{}}   HTTP 200
+
+(c) ClickHouse/Keeper IGNORE A MOUNTED YAML CONFIG UNLESS TOLD VIA ENV VAR.
+    The images' entrypoints default to `keeper_config.xml` / `config.xml`.
+    Mounting YAML alone is silently ignored ("Processing configuration file
+    '/etc/clickhouse-keeper/keeper_config.xml'"). Passing `--config-file` as
+    `command:` does NOT work either — the entrypoint already supplies that flag:
+
+        "Option must not be given more than once: config-file"   (restart loop)
+
+    The supported hook is the env var (entrypoint.sh line 35):
+    `KEEPER_CONFIG` / `CLICKHOUSE_CONFIG`. ClickHouse picks its parser from the
+    file extension, so `.yaml` is fine. `config-0-0.yaml` also keeps its exact
+    filename because its own `user_directories.users_xml.path` points back at
+    itself by relative name.
+
+(d) `ulimits: nofile 262144` IS A HARD FAILURE HERE, NOT A WARNING.
+    SigNoz's own compose sets it. In this container the hard limit is 4096 and
+    Docker cannot raise it:
+
+        "error setting rlimit type 7: operation not permitted"
+
+    Deliberately omitted, with a comment saying to raise it on a real host.
+
+--------------------------------------------------------------------------------
+4. §6.1 — THE STACK IS UP
+--------------------------------------------------------------------------------
+
+    $ docker compose -f signoz/deploy/docker-compose.yaml ps
+    signoz-telemetrykeeper-clickhousekeeper-0   Up (healthy)
+    signoz-telemetrystore-clickhouse-0-0        Up (healthy)
+    signoz-metastore-postgres-0                 Up (healthy)
+    signoz-schema-migrator-sync                 Exited (0)
+    signoz-schema-migrator-async                Up
+    signoz-signoz-0                             Up (healthy)
+    signoz-ingester                             Up
+
+    $ curl http://127.0.0.1:3301/api/v1/health      -> HTTP 200
+    $ curl http://127.0.0.1:3301/                   -> HTTP 200 (UI)
+
+--------------------------------------------------------------------------------
+5. §6.3 — A REAL DEVGUARD TRACE, STORED AND READ BACK
+--------------------------------------------------------------------------------
+
+Real traffic through the real backend (not a synthetic emitter): four GETs plus
+`POST /scan` with a SQL-injection snippet. The exact hierarchy SigNoz stored,
+read back out of ClickHouse:
+
+    name                statusCode  spanID            parentSpanID
+    scan_request        Error       5a8be2638aa8cb94  (root)
+    cache_lookup        Unset       0d64a54b2e07b94a  5a8be2638aa8cb94
+    resilient_pipeline  Error       83580bd33bc8b13c  5a8be2638aa8cb94
+    llm_invoke          Error       f0796b97a6c005ae  83580bd33bc8b13c
+    devguard_pipeline   Error       ec078ed040b0dd16  f0796b97a6c005ae
+    scanner_agent       Error       cabded8f11a18819  ec078ed040b0dd16
+    llm_invoke          Error       ea5f0c85102a1cb5  83580bd33bc8b13c
+    devguard_pipeline   Error       ff7d83a0dabb6b72  ea5f0c85102a1cb5
+    scanner_agent       Error       4015088b0b944d20  ff7d83a0dabb6b72
+
+Note the TWO `llm_invoke` subtrees under one `resilient_pipeline`: that is the
+circuit breaker's primary attempt and its fallback, visible as real trace
+structure rather than as a claim in a README.
+
+SCREENSHOTS (docs/audit-evidence/t2/signoz/):
+    01-signoz-home-services.png
+        SigNoz workspace: "Traces ingestion is active", and the Services table
+        listing `devguard-backend` with P99 latency and error rate.
+    02-devguard-trace-6c1abea5923d.png
+        The trace detail page — flame graph and waterfall — for trace
+        6c1abea5923dae88a757b545408af594, header reading
+        "devguard-backend — scan_request · 4.56 s · Spans: 9 · Errors: 8".
+
+The screenshot's trace ID is the SAME trace the automated verification asserted
+on in the run captured in signoz/verify-signoz-clean-run.txt. It is not a
+different, hand-picked trace.
+
+--------------------------------------------------------------------------------
+6. REPRODUCIBLE FROM A COMPLETELY CLEAN STACK
+--------------------------------------------------------------------------------
+
+`scripts/verify_signoz.sh` does the whole thing from `down -v` and exits
+non-zero on any failed assertion:
+
+    tear down (with volumes) -> assert no containers survive
+    bring up core            -> wait for API health
+    assert migrator exited 0 AND signoz_traces exists
+    create the org           -> print the pinned version
+    start the ingester       -> assert the OTLP receiver actually accepts
+    start the backend        -> drive real traffic
+    assert devguard-backend spans are STORED
+    assert the /scan trace is stored
+    assert scan_request / resilient_pipeline / devguard_pipeline / scanner_agent
+           are all present
+
+RUN TWICE FROM SCRATCH, BOTH EXIT 0:
+
+    run 1: trace da9f38b5d2ec458aa7f5e1e42fe9ccc1 — 28 spans stored, 9 in trace
+    run 2: trace 6c1abea5923dae88a757b545408af594 — 28 spans stored, 9 in trace
+
+A HARNESS BUG FOUND AND FIXED, recorded because it is the same class of mistake
+as the event-loop test earlier in this project: the first version polled for
+"any devguard-backend span" and then immediately asserted on the trace. Spans
+flush through TWO batching layers, and a parent span is only exported once it
+ENDS — so `scan_request` is the LAST span of its trace to arrive. The assertion
+caught a half-written trace (`spans in trace: 1`, only `cache_lookup`) and
+reported a FAILURE that was really a race in the test. The loop now waits for the
+ROOT span specifically. The bug was in the harness, not the deployment.
+
+--------------------------------------------------------------------------------
+7. WHAT IS *NOT* PROVEN, STATED PLAINLY
+--------------------------------------------------------------------------------
+
+§6.3's definition of done names `devguard_pipeline → scanner_agent → fixer_agent
+→ validator_agent`. **`fixer_agent` and `validator_agent` are NOT in this trace,
+and this evidence does not claim they are.**
+
+Reason, and it is not an instrumentation gap: without a live `GROQ_API_KEY` the
+Scanner's LLM call fails, the pipeline never reaches the Fixer, and `POST /scan`
+returns 503. The trace is real and complete *for the code that actually ran* —
+every span the execution produced is present, correctly nested, with accurate
+error status. What is missing is execution, not telemetry.
+
+The remaining §6.3 work is therefore gated on the same blocker as the rest of
+the live-LLM work: a Groq API key. One scan with a key, against this same stack,
+completes it — no code or deployment change required.
+
+Also out of scope for this run and untouched: §6.6 (dashboard import),
+§6.4 (log↔trace correlation) and §6.5 (the MCP decision).
+
+--------------------------------------------------------------------------------
+8. REPRODUCTION
+--------------------------------------------------------------------------------
+
+    docker compose -f signoz/deploy/docker-compose.yaml up -d signoz-signoz-0
+    curl -X POST http://127.0.0.1:3301/api/v1/register \
+      -H 'Content-Type: application/json' \
+      -d '{"name":"DevGuard","orgName":"devguard","email":"devguard@example.com","password":"DevGuard!2026"}'
+    docker compose -f signoz/deploy/docker-compose.yaml up -d
+
+    # or just:
+    ./scripts/verify_signoz.sh
+
+    # UI: http://localhost:3301   OTLP: localhost:4317 (gRPC) / 4318 (HTTP)
+
+NOTE ON THE BACKEND'S EXPORTER: gRPC reads its OWN proxy environment variables,
+so in a proxied session `NO_PROXY` alone is not enough — a loopback OTLP
+connection gets swallowed. `no_grpc_proxy=localhost,127.0.0.1` is what makes it
+work, and verify_signoz.sh sets it. This cost real debugging time: the backend
+reported `exporter_configured: true` and logged no errors while exporting
+nothing.
+
+================================================================================

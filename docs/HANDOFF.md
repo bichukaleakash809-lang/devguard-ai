@@ -1341,11 +1341,16 @@ Continuing past this point would mean inventing work. Do not.
 
 | § | Item | Status |
 |---|---|---|
-| 6.1 | Stand up SigNoz at a pinned version | **BLOCKED** |
-| 6.3 | One trace visible in the SigNoz UI + screenshot | **BLOCKED** |
-| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **BLOCKED** |
+| 6.1 | Stand up SigNoz at a pinned version | **DONE** — see "T2 §6.1 / §6.3 — SIGNOZ IS UP" below |
+| 6.3 | One trace visible in the SigNoz UI + screenshot | **DONE except the two agents that need a live LLM key** (same section) |
+| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **NOT STARTED** — no longer blocked; SigNoz is running |
 
-**The blocker is one thing only: container registry egress policy.**
+> The section below this table is the ORIGINAL blocked-state record from when the
+> registry was thought to be the wall. It is kept because its diagnosis is still
+> the reason the deployment took the shape it did — but §6.1 and §6.3 are no
+> longer blocked. Read "T2 §6.1 / §6.3 — SIGNOZ IS UP" for current state.
+
+**The blocker was believed to be one thing only: container registry egress policy.**
 
 Docker itself is fine — the daemon was not running and **I started it**; it
 works (`Server Version: 29.3.1`). But every registry is refused by the egress
@@ -1532,19 +1537,125 @@ egress and this repo's CI reaches pypi/npm, but neither proves Docker Hub's CDN
 is reachable from a runner. One step in a scratch workflow settles it:
 `- run: docker pull signoz/signoz:latest`.
 
-### Owner decision required
+### ~~Owner decision required~~ — RESOLVED BY READING THE CONTRACT
 
-The registry blocker is resolved **as a diagnosis**. §6.1/§6.3/§6.6 are **not**
-declared unblocked, because standing SigNoz up still needs `foundryctl`. Two
-ways forward, both the owner's call:
+I wrote here that a non-Foundry deployment "is a deployment-approach change away
+from the pinned `casting.yaml`, so it is not something to take unilaterally."
+**That was wrong.** `01_PLATFORM_MASTER.md` §6.1 already grants the choice:
 
-1. **Unblock `foundryctl`** — allowlist `signoz.io` (also fixes the SigNoz Cloud
-   route), or grant `SigNoz/foundry` via `add_repo` for the release archive.
-2. **Approve a non-Foundry deployment** of the already-downloaded images. This
-   is a deployment-approach change away from the pinned `casting.yaml`, so it is
-   not something to take unilaterally.
+> *"Choose the lightest path that works on the available machine and document
+> it. **If the Foundry/`casting.yaml` route is heavy or brittle, a documented
+> plain docker-compose SigNoz is a better judge experience — the criterion
+> rewards a working stack, not an exotic one.**"*
 
-Not proceeding further without that decision.
+`foundryctl` is not merely brittle here, it is unobtainable. So the contract's
+own fallback applies and **no owner action was required.** Proceeded on that
+basis; see the next section.
+
+---
+
+## T2 §6.1 / §6.3 — SIGNOZ IS UP, AND A REAL TRACE IS IN IT
+
+Full evidence: **`docs/audit-evidence/t2/signoz-6.1-6.3-verified.txt`**
+Screenshots: **`docs/audit-evidence/t2/signoz/`**
+
+### §6.1 — DONE
+
+`signoz/deploy/docker-compose.yaml` + four config files in
+`signoz/deploy/conf/`. **Nothing invented**: every service, image, env var and
+DSN is lifted from the committed `casting.yaml.lock` (foundryctl's own output),
+the config files are extracted VERBATIM and keep their original filenames, and
+the compose service names are exactly the hostnames those configs already
+reference — so not one byte of SigNoz's configuration was edited.
+
+**Versions pinned**, as §6.1 demands (`latest` is not a pin). Resolved by digest
+comparison, then confirmed by the running server (`/api/v1/version` →
+`v0.135.0`):
+
+| image | pin | note |
+|---|---|---|
+| `signoz/signoz` | **v0.135.0** | `latest` == this digest |
+| `signoz/signoz-otel-collector` | **v0.144.6** | `latest` == this digest |
+| `signoz/signoz-schema-migrator` | **v0.144.6** | matches the collector |
+| `clickhouse/clickhouse-server` / `-keeper` | 25.12.5 | already pinned in the lock |
+| `postgres` | 16 | already pinned in the lock |
+
+**Four things the lock file does not tell you** — each found by the stack
+failing, not by reading docs:
+
+1. **The schema migrator is absent from the lock entirely.** foundryctl runs
+   migrations internally. Translate the lock literally and the stack starts
+   clean, reports healthy, and **silently drops every span** — `signoz_traces`
+   does not exist. Added as a `service_completed_successfully` dependency of
+   both the ingester and the app.
+2. **The collector will not open its OTLP receiver until an organisation
+   exists.** It fetches its pipeline config over OpAMP and the server answers
+   *"cannot create agent without orgId"*. The container still logs *"Everything
+   is ready. Begin running and processing data."* and shows Up — while port 4318
+   refuses connections. `POST /api/v1/register` first, then start the ingester.
+3. **ClickHouse/Keeper ignore a mounted YAML config** unless pointed at it via
+   `CLICKHOUSE_CONFIG`/`KEEPER_CONFIG`. Passing `--config-file` as `command:`
+   fails differently — the entrypoint already supplies it
+   (*"Option must not be given more than once"*, restart loop).
+4. **`ulimits: nofile 262144` is a hard failure here**, not a warning
+   (*"error setting rlimit type 7: operation not permitted"*). Omitted, with a
+   comment to raise it on a real host.
+
+### §6.3 — DONE, except the two agents that need a live LLM key
+
+Real traffic through the real backend. The hierarchy SigNoz stored:
+
+```
+scan_request                       Error   (root)
+├── cache_lookup                   Unset
+└── resilient_pipeline             Error
+    ├── llm_invoke                 Error        <- primary attempt
+    │   └── devguard_pipeline      Error
+    │       └── scanner_agent      Error
+    └── llm_invoke                 Error        <- circuit-breaker fallback
+        └── devguard_pipeline      Error
+            └── scanner_agent      Error
+```
+
+The two `llm_invoke` subtrees are the breaker's primary and fallback attempts —
+visible as real trace structure rather than as a README claim.
+
+Screenshot `signoz/02-devguard-trace-6c1abea5923d.png` shows the trace detail
+page reading **"devguard-backend — scan_request · 4.56 s · Spans: 9 · Errors: 8"**,
+and `01-signoz-home-services.png` shows *"Traces ingestion is active"* with
+`devguard-backend` in the Services table. The screenshot's trace ID is the SAME
+trace the automated verification asserted on — not a hand-picked different one.
+
+**What is NOT proven, stated plainly:** §6.3's definition of done names
+`devguard_pipeline → scanner_agent → fixer_agent → validator_agent`.
+**`fixer_agent` and `validator_agent` are not in this trace.** Without a live
+`GROQ_API_KEY` the Scanner's LLM call fails, the pipeline never reaches the
+Fixer, and `/scan` returns 503. The trace is real and complete *for the code that
+actually ran*; what is missing is execution, not instrumentation. One scan with a
+key against this same stack finishes §6.3 — no code or deployment change needed.
+
+### Reproducible from a completely clean stack
+
+`scripts/verify_signoz.sh` runs the whole thing from `down -v` and exits
+non-zero on any failed assertion. **Run twice from scratch, both exit 0** —
+28 spans stored, 9 in the trace, all four expected span names present.
+
+**A harness bug found and fixed, recorded because it is the same class of
+mistake as the event-loop test earlier in this project:** the first version
+polled for "any devguard-backend span" and then immediately asserted on the
+trace. Spans flush through two batching layers and a parent span is only
+exported once it **ends**, so `scan_request` is the *last* span of its trace to
+arrive. The assertion caught a half-written trace (`spans in trace: 1`) and
+reported a failure that was really a race in the test. It now waits for the root
+span specifically. The bug was in the harness, not the deployment.
+
+### One more trap worth knowing
+
+The backend reported `exporter_configured: true`, logged no errors, and exported
+**nothing**. Cause: **gRPC reads its own proxy environment variables**, so in a
+proxied session `NO_PROXY` alone does not cover a loopback OTLP connection.
+`no_grpc_proxy=localhost,127.0.0.1` is what makes it work; `verify_signoz.sh`
+and `DEPLOYMENT.md` both set it.
 
 ---
 

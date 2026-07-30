@@ -1,0 +1,54 @@
+
+=== 0. Tear down completely (including volumes) ===
+clean
+
+=== 1. Bring up everything EXCEPT the ingester ===
+SigNoz API healthy
+
+=== 2. Confirm the schema migrator ran ===
+migrator exit 0; signoz_traces exists
+
+=== 3. First-run setup: create the organisation ===
+{"version":"v0.135.0","ee":"Y","setupCompleted":true}
+
+=== 4. Start the ingester (now that an org exists) ===
+OTLP receiver accepting on 4318
+
+=== 5. Start the DevGuard backend, exporting to the live ingester ===
+backend up
+
+=== 6. Drive real traffic ===
+trace_id: 6c1abea5923dae88a757b545408af594
+
+=== 7. ASSERT: spans are STORED in SigNoz ===
+devguard-backend spans stored: 28
+spans in trace 6c1abea5923dae88a757b545408af594: 9
+
+--- span hierarchy as SigNoz stored it ---
+scan_request	Error	79c950e1cbaf75ee	
+cache_lookup	Unset	77bec5d90361622e	79c950e1cbaf75ee
+resilient_pipeline	Error	527ba8ee571a92de	79c950e1cbaf75ee
+llm_invoke	Error	fb62143c897711f7	527ba8ee571a92de
+devguard_pipeline	Error	0a28f31bb53371a6	fb62143c897711f7
+scanner_agent	Error	4f3c956a50f63120	0a28f31bb53371a6
+llm_invoke	Error	33b959a253d1ea05	527ba8ee571a92de
+devguard_pipeline	Error	c440f2f6851c5b4c	33b959a253d1ea05
+scanner_agent	Error	b18b11e5b6d8a304	c440f2f6851c5b4c
+
+=== 8. ASSERT: the expected pipeline spans are present ===
+  present: scan_request
+  present: resilient_pipeline
+  present: devguard_pipeline
+  present: scanner_agent
+
+================================================================
+PASSED — SigNoz is up (§6.1) and a real DevGuard trace is stored
+and readable back out of it (§6.3).
+  UI:       http://127.0.0.1:3301
+  trace:    http://127.0.0.1:3301/trace/6c1abea5923dae88a757b545408af594
+================================================================
+
+NOT asserted here, and deliberately so: fixer_agent and validator_agent.
+Without a live GROQ_API_KEY the Scanner's LLM call fails, so the pipeline
+never reaches the Fixer. The trace above is real and complete for what the
+code actually executed; the full four-agent chain needs a key.

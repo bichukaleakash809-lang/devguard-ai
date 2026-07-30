@@ -54,16 +54,48 @@ Recommended for hackathon speed: **Vercel + Railway + Upstash + SigNoz Cloud**. 
    ```
 4. Set `NEXT_PUBLIC_SIGNOZ_URL` on the frontend to your SigNoz workspace URL so the "Investigate in SigNoz" CTA deep-links correctly.
 
-**Option B — Self-hosted (Docker Compose):**
-```bash
-git clone -b main https://github.com/SigNoz/signoz.git
-cd signoz/deploy/docker
-docker compose up -d
-# SigNoz UI at http://localhost:3301, OTLP at http://localhost:4317
-```
-Then set `OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4317`.
+**Option B — Self-hosted (Docker Compose). This is the one that is actually
+verified.** A compose file lives in this repo, so there is no second clone:
 
-> **Recommendation:** Use **Cloud** for the demo. Self-hosting SigNoz pulls ~8 containers and can starve a laptop mid-judging. Keep self-host only for your local `docker compose` fallback.
+```bash
+# 1. Core services (ClickHouse + Keeper + Postgres + schema migrator + app)
+docker compose -f signoz/deploy/docker-compose.yaml up -d signoz-signoz-0
+
+# 2. First-run setup — REQUIRED, and not optional in the way it looks.
+#    The OTLP collector fetches its pipeline config from the SigNoz server over
+#    OpAMP, and the server will not register it until an organisation exists
+#    ("cannot create agent without orgId"). Skip this and the collector comes up
+#    "healthy" but never opens port 4317/4318 and silently drops every span.
+curl -X POST http://localhost:3301/api/v1/register \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"DevGuard","orgName":"devguard","email":"you@example.com","password":"<choose-one>"}'
+
+# 3. Now start the ingester
+docker compose -f signoz/deploy/docker-compose.yaml up -d
+
+# SigNoz UI at http://localhost:3301, OTLP at localhost:4317 (gRPC) / 4318 (HTTP)
+```
+
+Then set `OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4317`. **If your shell has an
+HTTPS proxy configured, also set `no_grpc_proxy=localhost,127.0.0.1`** — gRPC
+reads its own proxy variables and `NO_PROXY` alone does not cover it, so the
+backend will report `exporter_configured: true`, log nothing, and export nothing.
+
+To check the whole thing end to end, including that spans are genuinely stored:
+
+```bash
+./scripts/verify_signoz.sh     # tears down with -v, rebuilds, asserts, exits non-zero on failure
+```
+
+Pinned versions: `signoz/signoz:v0.135.0`, `signoz/signoz-otel-collector:v0.144.6`,
+`signoz/signoz-schema-migrator:v0.144.6`, `clickhouse/clickhouse-server:25.12.5`,
+`clickhouse/clickhouse-keeper:25.12.5`, `postgres:16`. Evidence, including the
+non-obvious failure modes and screenshots of a real trace:
+`docs/audit-evidence/t2/signoz-6.1-6.3-verified.txt`.
+
+> **Which to use:** self-hosting pulls ~4 GB of images and runs 7 containers, so
+> for a laptop demo **Cloud** is still the lighter choice. Option B is what this
+> repo has actually verified, and it is the fallback that works with no account.
 
 ---
 
