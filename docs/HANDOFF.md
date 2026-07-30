@@ -1045,6 +1045,65 @@ SECURITY.md and as open issue 9. Evidence:
 
 ---
 
+## STOPPING POINT — the verifiable non-blocked work is done
+
+Recorded because the instruction was to stop and report rather than invent work.
+A final repo-wide sweep found **no remaining instances** of the pattern that
+produced most of this session's findings.
+
+**The sweep.** `getattr(x, "field", default)` where `field` cannot exist on `x`
+accounted for **six** separate defects. Grepping `backend/`, `scripts/` and
+`groq_client.py` now returns 53 hits, every one of which is:
+
+* a field that genuinely exists on the object (`Vulnerability.severity`,
+  `ScanRequest.language`, `ValidationResult.eval_score`, …),
+* deliberate defence against an external SDK object whose shape is not ours to
+  guarantee (`resp.usage` in `_extract_usage` / `_call_cost` / `_total_tokens`), or
+* a quotation of the old code inside a docstring explaining the fix.
+
+**Modules audited to a conclusion, with the outcome:**
+
+| Module | Outcome |
+|---|---|
+| `backend/api/router.py` | 6 defects found and fixed; fully swept |
+| `backend/core/cache.py` | round trip fixed; hit/miss counters fixed |
+| `backend/core/ai_agent.py` | token+cost threading, prompt boundary, clean-code short-circuit, model-facing schema |
+| `backend/core/self_observer.py` | safety floor fixed; `suggest_context_k_detailed` added |
+| `backend/core/resilience.py` | degradation made real; `served_by` made true |
+| `backend/core/local_telemetry.py` | exact costs; second price table removed |
+| `backend/core/god_mode_orchestrator.py` | Pre-Cog provenance fixed; `context_k_source` added |
+| `backend/core/audit.py` | append perf, paginated read, real verdict |
+| `backend/core/benchmark.py` | errored scans distinguished; artifact CLI |
+| `backend/core/telemetry.py` | shutdown fail-safety (T2 §6.7) |
+| `backend/core/rag_store.py` | determinism + relevance (T1) |
+| `backend/main.py` | reviewed — clean. CORS `*` with `allow_credentials=False` is the safe pairing and is documented as a known weakness |
+| `backend/api/god_mode_simulators.py` | reviewed — clean, thin delegation only |
+| `scripts/doctor.py` | verified: exits 0 with deps present, exits 1 with actionable output without them |
+| WebSocket handler `ws_scan` | reviewed — subscriber registration precedes the buffer drain, so no lost-event window; cleanup is in `finally`. No defect found |
+
+**A hang I reported and could not reproduce.** One `make doctor` invocation timed
+out at 2 minutes. Direct re-runs exit 0 well inside 90 s, and without dependencies
+it correctly exits 1 with actionable output. The timeout coincided with a
+`sleep 300` background task and a pytest stress loop competing for the machine.
+Recorded as transient rather than as a defect — an unreproducible symptom is not a
+finding.
+
+**What is left is all blocked, on one of exactly three things:**
+
+1. **The registry egress policy** — T2 §6.1, §6.3 (SigNoz UI screenshot), §6.6,
+   and the Docker build (AUDIT B1/B2/A1). One allowlisted CDN host unblocks it.
+2. **A live `GROQ_API_KEY`** — no scan has ever run against a real LLM, so nothing
+   measures whether the Scanner finds real vulnerabilities or the Fixer writes
+   correct patches. That also gates the benchmark artifact,
+   `verify_otel.py --require-agent-spans`, and any measured decision about wiring
+   the Pattern-Learning loop.
+3. **Owner approval** — the dependency decisions (open issues 4, 9, 10) and the
+   `signoz-system` gitlink (open issue 5).
+
+Continuing past this point would mean inventing work. Do not.
+
+---
+
 ## T2 — WHAT IS STILL OPEN (blocked, with evidence)
 
 | § | Item | Status |
@@ -1279,4 +1338,10 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `b34353b` + this update. CI green on runs 21-34, all four jobs.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `7b66745` + this update.*
+
+*CI: green on runs 21-34 and 36-38, all four jobs. **Run 35 (`57b6f20`) was
+CANCELLED**, not failed — `concurrency: cancel-in-progress` killed it when I
+pushed `79c2b6b` moments later. Its content is CI-verified at `79c2b6b` (run 36),
+which contains it. Stated precisely because "green on every commit" would be
+wrong.*
