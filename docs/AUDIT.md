@@ -324,7 +324,7 @@ see A5 for the workspace-identifier leak.
 |---|---|---|---|
 | **B1** | **`backend/Dockerfile` copies files that are not in its build context.** Compose sets `context: ./backend`, but the Dockerfile does `COPY requirements.txt .` — and `requirements.txt` lives at the repo **root**. `backend/requirements.txt` does not exist. | `docker compose build backend` fails on the first `COPY`. The backend image has **never** been built successfully. §2 only flagged the *frontend* Dockerfile. | **Critical** |
 | **B2** | **`backend/Dockerfile`'s CMD targets the wrong module path.** `CMD uvicorn main:app` with context `./backend` puts `main.py` at `/app/main.py` — but `main.py` imports `from backend.core import telemetry` and `from backend.api.router import router`, and no `backend/` package exists inside the image. `groq_client.py` (root) is also outside the context. | Even if B1 were fixed, the container would `ModuleNotFoundError` on boot. | **Critical** |
-| **B3** | **`signoz-system` is an orphaned git submodule.** `git ls-tree -r HEAD` shows `160000 commit de1e21a05052e9527b04a3e3c7afae2fb02597e1 signoz-system` — a gitlink — but **there is no `.gitmodules` file**. | `git clone --recurse-submodules` errors; `git submodule update --init` fails with *"No url found for submodule path 'signoz-system'"*. The directory clones empty. A judge's clean clone hits this immediately. | **Critical** |
+| **B3** | **`signoz-system` is an orphaned git submodule.** `git ls-tree -r HEAD` shows `160000 commit de1e21a05052e9527b04a3e3c7afae2fb02597e1 signoz-system` — a gitlink — but **there is no `.gitmodules` file**. | Measured, not inferred (correcting an earlier overstatement in this row that said a recursive clone "errors" — it does not): `git clone --recurse-submodules` exits **0** and leaves `signoz-system/` **empty**, so an ordinary clone succeeds silently. It is the explicit submodule commands that fail: `git submodule update --init` → exit 128, *"fatal: No url found for submodule path 'signoz-system' in .gitmodules"*, and `git submodule status` → exit 128, *"fatal: no submodule mapping found in .gitmodules for path 'signoz-system'"*. So a judge's clean clone is **not** blocked; the cost is an empty directory that looks like missing content, plus two git commands that hard-fail if anyone runs them. | **Low** (downgraded from Critical: a clean clone works) |
 | **B4** | **Backend is unimportable without `GROQ_API_KEY`** (`groq_client.py:18` raises at import time). | No import, no test, no typecheck, no CI, no `make doctor`, no boot — without a live paid API key. | **Critical** |
 | **B5** | **Two OTel instrumentation packages imported by `main.py` are absent from `requirements.txt`** (`opentelemetry-instrumentation-logging`, `opentelemetry-instrumentation-fastapi`). Only the latter is present, and only as a transitive dep of `chromadb`. | `pip install -r requirements.txt` then `uvicorn backend.main:app` → `ModuleNotFoundError` (reproduced, §2.3). The documented quickstart cannot work. | **Critical** |
 | **B6** | **No ESLint config**; `npm run lint` is interactive. | CI hangs. §10's lint gate cannot be met. | **High** |
@@ -513,7 +513,7 @@ LAW 3; all of it is T1a scope.
 |---|---|---|
 | `chromadb`, `sentence-transformers` in `requirements.txt` | **Cut** | Optional accelerators behind `try/except`; > 1 GiB of torch for a path a judge will never exercise. Raises no criterion; actively harms Technical Execution by making install brutal. |
 | `casting.yaml` / `casting.yaml.lock` / `pours/` (SigNoz Foundry) | **Cut or demote** | The README makes `foundryctl cast` a *required* quickstart step for a binary that a judge will not have. §6.1 already permits choosing "the lightest path that works" and prefers plain docker-compose. Foundry raises no criterion and adds a hard dependency to the first five minutes. |
-| `signoz-system` gitlink | **Cut** | An orphaned submodule pointer that breaks clean clones and references nothing. |
+| `signoz-system` gitlink | **Cut** | An orphaned submodule pointer that references nothing. It does not break a clean clone (measured: exit 0, empty directory — see B3), so this is tidiness rather than a blocker. Deletion needs approval per contract §6; tracked as HANDOFF open issue 5. |
 | `scripts/load_test.py` | **Keep, deprioritise** | Harmless; not evidence of anything judged. |
 | The `Threats Blocked` / `Global Latency` ticker | **Cut entirely** | LAW 3. §7.4 already specifies the honest replacement (real status bar). |
 | The god-mode *simulator* framing | **Keep the endpoints, re-aim them** | The orchestrator is the right shape. What must go is the frontend's synthetic-by-default wiring (D3). |
@@ -598,7 +598,9 @@ Offered as recommendations under §21.7 / §14.6. **No action taken.**
    `opentelemetry-instrumentation-logging` to `requirements.txt` (pinned).
 3. **Frontend typecheck** — fix the five TS2322 errors. The correct fix is not a
    cast; it is D1/D4 (panels take the real props, no default merging).
-4. **B3** — remove the `signoz-system` gitlink.
+4. **B3** — remove the `signoz-system` gitlink. *(Deprioritised: a clean clone
+   works, so this is cosmetic. Needs approval — contract §6 forbids deleting
+   files unasked.)*
 5. **B1/B2** — rebuild `backend/Dockerfile` against the repo root as context, or
    move `requirements.txt` + `groq_client.py` into `backend/`. Fix the CMD to
    `backend.main:app`.

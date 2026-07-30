@@ -135,8 +135,31 @@ To skip local SigNoz (lighter): `docker compose up frontend backend redis`.
 ## 6. Pre-demo checklist
 
 - [ ] `curl $NEXT_PUBLIC_API_URL/slo-status` returns 200
-- [ ] `curl $NEXT_PUBLIC_API_URL/audit-log/verify` returns `chain_verified: true`
+- [ ] `curl $NEXT_PUBLIC_API_URL/audit-log/verify` returns `"valid": true` —
+      **not** `chain_verified`, which this checklist previously named and which
+      the endpoint has never returned. The real shape is
+      `{"valid": true, "entries_checked": N, "broken_at": null, "reason": "chain intact"}`.
+- [ ] `curl $NEXT_PUBLIC_API_URL/telemetry-status` — confirms what the OTLP
+      exporter and the MCP path are *actually* configured with, rather than what
+      you intended. `signoz_mcp.verified_against_real_server` is `false` in every
+      deployment so far; see `docs/MCP_DECISION.md`.
 - [ ] A test scan completes end-to-end on the deployed URL
 - [ ] A trace appears in SigNoz for that scan
+- [ ] `NEXT_PUBLIC_SIGNOZ_URL` is set on the frontend — the "Investigate this
+      trace in SigNoz" CTA does not render without it (by design; it used to
+      fall back to `cloud.signoz.io` and 404)
 - [ ] Local `docker compose up` also works (**currently FAILS — see status note**)
 - [ ] Demo video uploaded and linked in README
+
+## 7. What the accuracy strip shows in a fresh deployment
+
+Nothing — it reads "accuracy not measured". Figures reach the UI only from an
+artifact a real benchmark run wrote:
+
+```bash
+python -m backend.core.benchmark --json data/benchmark_report.json   # needs GROQ_API_KEY
+```
+
+Point `DEVGUARD_BENCHMARK_ARTIFACT` at that file if you mount it elsewhere. The
+harness refuses to write the artifact when any scan errored, so a run during a
+provider outage cannot publish its depressed rates as the scanner's accuracy.

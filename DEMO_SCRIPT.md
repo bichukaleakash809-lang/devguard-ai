@@ -38,7 +38,17 @@
 ## 0:45 – 1:30 | Page 2 — The reveal (the core "wow")
 
 **Say:**
-> "Here's the diff — parameterized query, fix applied. Latency, tokens, cost, all real."
+> "Here's the diff — parameterized query, fix applied. Latency, tokens and cost are all measured off this request."
+
+> **Verified as of this revision.** All three are real: latency is wall-clock,
+> `tokens_used` is the provider-reported prompt+completion sum across the agents
+> that ran (`null`, shown as "not reported", if the provider omitted usage), and
+> cost is computed from those tokens. Two things that used to be on this screen
+> are **gone** and must not be narrated: the CVSS 9.5 → 1.2 "Security Score
+> Delta" (both numbers came from lookup tables, and nothing re-scores the patched
+> code) and the "90% Accuracy · 92% Precision · 88% Recall" proof strip (the
+> harness has never been run). The header now shows the severity band found and
+> the Validator's eval score; the strip says "accuracy not measured".
 
 **Point at the "Model routing & self-correction" panel:**
 > "Because this is critical severity, it routed to the strongest model — and that's a hard-coded safety floor. Cost pressure can NEVER downgrade a critical fix. Watch what happens with a lower-severity scan."
@@ -59,8 +69,28 @@ beat. (LAW 6: the numbers come from the machine.)
 
 **Do:** Click **"Investigate this trace in SigNoz."**
 
-**Say:**
-> "And here's the real trace — Scanner, Fixer, Validator as nested spans, plus the routing-override decision stamped right onto the trace. Nothing hidden, fully reproducible — the whole SigNoz stack is deployed via Foundry, `casting.yaml` is in the repo, you can spin up the exact same setup yourself."
+> **⚠ THIS BEAT IS NOT RECORDABLE.** No SigNoz instance has ever received a
+> DevGuard trace, and the "Investigate this trace in SigNoz" button no longer
+> renders unless `NEXT_PUBLIC_SIGNOZ_URL` is set to a SigNoz you actually run. The
+> `casting.yaml` / Foundry line below claimed a deployment that does not exist —
+> `foundryctl` was never run against this repo. Do **not** say it.
+>
+> **What you can honestly show instead**, and it is a stronger beat because it is
+> reproducible on the judge's own machine:
+>
+> ```bash
+> python scripts/verify_otel.py
+> ```
+>
+> That stands up an in-process OTLP/gRPC receiver, boots the real app, drives a
+> request through it, and asserts against the decoded protobuf — spans and
+> log↔trace correlation, proven from the wire rather than from a screenshot.
+> Say: *"Here is the actual OTLP export, decoded and asserted. Point
+> `OTEL_EXPORTER_OTLP_ENDPOINT` at any SigNoz and these same spans land there."*
+
+**Original beat, retained for when a SigNoz instance is available:**
+
+> "And here's the real trace — Scanner, Fixer, Validator as nested spans, plus the routing-override decision stamped right onto the trace."
 
 **Show:** SigNoz Trace Detail waterfall, briefly hover the routing-override span attribute if visible.
 

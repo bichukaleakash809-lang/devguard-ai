@@ -37,10 +37,14 @@ Only `main`. There are no released versions and no backported fixes.
 
 ## What is regression-protected
 
-70 tests run on every push in CI, with no API key, no collector and no network
+150 tests run on every push in CI, with no API key, no collector and no network
 (`.github/workflows/ci.yml`). They cover the typed agent boundaries, the audit
 chain's tamper detection, the circuit-breaker state machine, telemetry
-fail-safety, and the untrusted-content boundary above. CI also runs a real OTLP
+fail-safety, the untrusted-content boundary above, and the `/scan` response
+contract — including that no published number is a hard-coded constant, that the
+audit-chain badge cannot claim a verified chain for an entry that has not been
+written, and that a model cannot author DevGuard's own measurements
+(`tokens_used`, `model_used`) through its JSON output. CI also runs a real OTLP
 export verification and the secret scan. So the properties claimed in this file
 are checked mechanically rather than asserted once.
 

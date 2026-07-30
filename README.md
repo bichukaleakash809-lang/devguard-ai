@@ -4,7 +4,15 @@
 
 **DevGuard doesn't just get observed — it observes itself, and adapts.**
 
-An autonomous, self-healing AI security pipeline that scans code for vulnerabilities, fixes them through a Scanner → Fixer → Validator reflection loop, and — uniquely — **queries its own SigNoz telemetry (via MCP) to change its own runtime behavior**, not just to fill a dashboard for a human to read later.
+An autonomous, self-healing AI security pipeline that scans code for vulnerabilities, fixes them through a Scanner → Fixer → Validator reflection loop, and feeds its own telemetry back into its next decision — model tier, retrieval depth, spend ceiling — rather than only recording it for a human to read later.
+
+> **Read this before the pitch below.** The self-observation loop currently reads
+> an **in-process** telemetry shadow, not SigNoz. The MCP client that would query
+> SigNoz itself has never completed a round trip against a real server, so
+> "queries its own SigNoz telemetry via MCP" is a design, not a demonstrated
+> capability — see [Limitations](#limitations) and `docs/MCP_DECISION.md`. Every
+> adaptation described below does fire, and is labelled with its real data
+> source in the API response and the UI.
 
 Built for the [Agents of SigNoz](https://www.wemakedevs.org/hackathons/signoz) hackathon (OpenAI Agent Builder + SigNoz Observability tracks).
 
@@ -16,7 +24,7 @@ Manual security code review does not scale with commit velocity, and catches vul
 
 ## The Differentiator: Self-Observation
 
-Every other AI-observability integration treats telemetry as something *recorded for humans* — dashboards, traces, alerts someone reads after the fact. DevGuard's agents read their **own** recent telemetry, live, in the same request path, and use it to change what they do next:
+Every other AI-observability integration treats telemetry as something *recorded for humans* — dashboards, traces, alerts someone reads after the fact. DevGuard's agents read their **own** recent telemetry, live, in the same request path, and use it to change what they do next. In the diagram below, the dashed `queried back` edge from SigNoz is the **unverified** part; the loops themselves run off `backend/core/local_telemetry.py`.
 
 ```mermaid
 flowchart TD
@@ -62,9 +70,8 @@ Every adaptation is: **(a)** returned in the API response as `self_observation`,
 | Backend | FastAPI, Python 3.11, async throughout |
 | AI Engine | Groq (Llama 3.3 70B / 3.1 8B — severity + telemetry-routed), swap point marked for GPT-5.6 |
 | Vector Store | In-process CWE/OWASP RAG store |
-| Observability | OpenTelemetry → SigNoz (self-hosted via SigNoz Foundry) |
+| Observability | OpenTelemetry (traces, metrics, logs) exporting OTLP/gRPC — verified against a local collector, **not** yet against SigNoz |
 | Resilience | Custom circuit breaker with fallback routing |
-| Reproducibility | `casting.yaml` + `casting.yaml.lock` (Foundry) |
 
 ## Core Features
 
@@ -105,11 +112,28 @@ Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI 
 
 ## Reproducibility
 
-Judges can re-run the exact SigNoz deployment used for this submission:
+**What is verified and reproducible today**, on a clean checkout with no
+container registry and no API key:
+
 ```bash
-foundryctl cast -f casting.yaml
+make doctor          # reports exactly what is present and what is missing
+make test            # the test suite (no key, no collector, no network)
+python scripts/verify_otel.py    # boots the real app, asserts decoded OTLP
 ```
-`casting.yaml.lock` pins the resolved configuration.
+
+`scripts/verify_otel.py` stands up an in-process OTLP/gRPC receiver, starts a
+real uvicorn, drives traffic through it and asserts against the decoded
+protobuf — so the telemetry pipeline is proven end to end without SigNoz. Its
+output is in `docs/audit-evidence/t2/otel-verification.json`.
+
+**What is not reproducible yet.** `casting.yaml` and `casting.yaml.lock` (SigNoz
+Foundry) are committed, but no SigNoz deployment has ever been stood up from
+them — `foundryctl` is not installed here and image pulls are blocked
+(`docs/audit-evidence/t2/registry-egress-diagnosis.txt`). This section
+previously read *"Judges can re-run the exact SigNoz deployment used for this
+submission"*; there is no such deployment to re-run. Treat those two files as an
+untested deployment plan. To point DevGuard at a SigNoz you already run, set
+`OTEL_EXPORTER_OTLP_ENDPOINT` — see `DEPLOYMENT.md` §2.
 
 ## Limitations
 
@@ -123,11 +147,25 @@ Stated plainly, because a claim a judge can disprove costs more than the feature
   backend and frontend directly (see Quickstart). Fixing this needs container
   registry access, which is currently blocked; evidence in
   `docs/audit-evidence/t2/registry-egress-block.txt`.
-- **The benchmark harness has never been run to an artifact**, so no accuracy figures are published anywhere.
-- **Test coverage is real but partial.** 70 tests run in CI on every push
-  (contracts, audit chain, circuit breaker, telemetry fail-safety, injection
-  boundary). The agent pipeline's own end-to-end path is **not** covered,
-  because it needs a live LLM key — no live scan has been executed or verified.
+- **The benchmark harness has never been run to an artifact**, so no accuracy
+  figures are published anywhere. The result page shows "accuracy not measured"
+  until one exists. To produce one you need a working `GROQ_API_KEY`:
+  ```bash
+  python -m backend.core.benchmark --json data/benchmark_report.json
+  ```
+  That artifact is the **only** route by which a number reaches the API or the
+  UI — nothing is hard-coded at either end, and the harness refuses to write it
+  if any scan errored (pass `--allow-errored` to override).
+- **Test coverage is real but partial.** 150 tests run in CI on every push, with
+  no API key, no collector and no network: schema contracts, audit chain
+  tamper-detection, the paginated audit read, circuit breaker, telemetry
+  fail-safety, the prompt-injection boundary, RAG determinism, the benchmark
+  harness, the reflection loop's control flow, and the `/scan` response contract.
+  The reflection loop's **orchestration** is covered end to end with the three
+  agent calls monkeypatched — convergence, retry threading, exhaustion, the
+  clean-code short-circuit. What is **not** covered is the models' own judgement:
+  no scan has ever run against a live LLM, so nothing here measures whether the
+  Scanner finds real vulnerabilities or the Fixer writes correct patches.
 - **No `LICENSE` file yet.** One must be added before this is distributed.
 
 ## License
