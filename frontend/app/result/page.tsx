@@ -390,6 +390,12 @@ function ResultDashboard() {
       try {
         const res = await fetch(`${API}/scan/${scanId}/${decision}`, { method: "POST" });
         if (!res.ok) throw new Error(`the backend responded with HTTP ${res.status}`);
+        // Re-fetch rather than keeping the optimistic patch. The decision is
+        // what WRITES the audit entry, so the backend now holds chain state the
+        // client cannot derive: `audit_entry` moves from "pending" to "written"
+        // with the real prev_hash/entry_hash. Without this the compliance footer
+        // keeps showing "Audit entry pending approval" after the entry exists.
+        await fetchResult();
       } catch (err) {
         setResult(prev); // rollback on failure
         // ...and SAY so. A silent rollback on the approval gate means the user
@@ -403,7 +409,7 @@ function ResultDashboard() {
         setApprovalState("idle");
       }
     },
-    [scanId, result]
+    [scanId, result, fetchResult]
   );
 
   /* ---- render gates ------------------------------------------------------ */

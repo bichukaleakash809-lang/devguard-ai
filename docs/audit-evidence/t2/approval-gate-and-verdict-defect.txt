@@ -73,3 +73,37 @@ AFTER — four distinguishable outcomes:
   chain across mixed verdicts: valid=True, entries=4
 
 ALL ASSERTIONS PASSED
+
+============================================================================
+FULL GATE -> APPROVE CYCLE, END TO END
+============================================================================
+
+1. POST /scan (critical finding)
+     status              pending_approval
+     severity            critical
+     verdict             pass
+     audit entries       0   <- nobody has decided yet
+     chain_state         pending
+
+2. POST /scan/c1/approve
+     status              approved
+     verdict             pass
+     audit entries       1   <- the decision is now recorded
+     chain_state         written
+     entry_hash          0707ae63ffcdd815903e5184...
+     recorded verdict    'pass'
+
+3. POST /scan/c2/reject (high finding, Validator failed it)
+     status              rejected
+     recorded verdict    'rejected'
+
+4. GET /audit-log/verify
+     valid               True
+     entries_checked     2
+     verdicts on record  ['pass', 'rejected']
+
+  Before this fix step 1 returned status='completed' with an audit entry
+  already written recording verdict='unknown', and steps 2-4 were
+  unreachable.
+
+ALL ASSERTIONS PASSED
