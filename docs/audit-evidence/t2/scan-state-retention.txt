@@ -1,0 +1,45 @@
+==========================================================================
+UNBOUNDED IN-MEMORY SCAN STATE — measured before and after
+==========================================================================
+
+BEFORE: `_scan_results[scan_id] = frontend_result` with no eviction path
+        anywhere in router.py. grep -c '_scan_results.pop' -> 0.
+
+one retained result, code at the 50,000-char cap: 53.4 KiB
+
+projected retention with no eviction (nothing ever released):
+      100 scans ->       5.2 MiB held until the process dies
+    1,000 scans ->      52.1 MiB held until the process dies
+   10,000 scans ->     521.2 MiB held until the process dies
+  100,000 scans ->    5212.0 MiB held until the process dies
+
+==========================================================================
+AFTER: bounded by count (500) AND age (3600s)
+==========================================================================
+
+stored 20,000 results through the real store path in 0.78s
+  entries retained:      500  (cap 500)
+  timestamps retained:   500  <- no parallel leak
+  amortised cost/store:  0.0391 ms
+  worst-case retention:  26 MiB, flat, regardless of traffic
+
+the newest are what survive (a dashboard fetch follows its own scan):
+  's19999' present: True
+  's0'     present: False
+
+age-based expiry, for a deployment too quiet to hit the count cap:
+  older than the TTL -> evicted: True
+  inside the TTL     -> kept:    True
+
+undecided approval gates expire too (`created_at` was written, never read):
+  abandoned gate     -> evicted: True
+  live gate          -> kept:    True
+  malformed entry    -> kept:    True   <- never discard a pending human decision over a missing field
+
+the WebSocket buffer is length-capped per scan:
+  250 events buffered -> 200 retained (cap 200)
+  last retained seq = 249  <- the terminal 'done' event is always last
+
+The audit log is untouched by all of this — it is the durable record.
+
+ALL ASSERTIONS PASSED

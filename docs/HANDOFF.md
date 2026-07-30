@@ -24,12 +24,12 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 
 | # | Priority | Status |
 |---|---|---|
-| 1 | Performance | Two real bottlenecks found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`), `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`). No further hot path identified by measurement — do not "optimise" without a number first. |
+| 1 | Performance | Three real problems found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`); `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`); unbounded in-memory scan state, 53.4 KiB leaked per scan → 26 MiB flat. RAG retrieval measured and found NOT to be a bottleneck (0.16–2.1 ms) — recorded as a negative result. |
 | 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract and the resilience degradation path all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
-| 6 | Test coverage | 58 → 190, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 204, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 190 passing**, all with no API key, no collector, no network.
+**Test inventory — 204 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -251,6 +251,8 @@ false-negative risk is real and stated.
 - `test_resilient_fallback.py` (9) — the degraded path genuinely uses a
   different model, and `llm.served_by` reports what ran rather than what was
   requested
+- `test_scan_state_retention.py` (14) — the three in-memory dicts are bounded by
+  count and age, and eviction never drops a live result or a pending approval
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -464,6 +466,83 @@ said `-> ScanResult` while both return `PipelineResult`.
 Evidence: `docs/audit-evidence/t2/resilient-fallback-defect.txt`.
 **Tests 181 → 190.**
 
+### Unbounded in-memory scan state — a measured memory leak
+
+Three process-local dicts in `router.py`, all keyed by `scan_id`, none with an
+eviction path that always runs:
+
+- **`_scan_results`** had **no eviction path at all** —
+  `grep -c '_scan_results.pop' backend/api/router.py` returned **0**. Every scan
+  added an entry and nothing ever removed it. Each entry holds `original_code`
+  *and* `fixed_code`, and `ScanRequest.code` is capped at 50,000 characters.
+
+  Measured, one entry at that cap: **53.4 KiB**.
+
+  ```
+      100 scans ->     5.2 MiB held until the process dies
+    1,000 scans ->    52.1 MiB
+   10,000 scans ->   521.2 MiB
+  100,000 scans ->  5212.0 MiB
+  ```
+
+  The durable record that actually needs to survive is the audit log, which is
+  on disk and untouched by any of this.
+
+- **`_pending_approvals`** is popped on `/approve` and `/reject`, but a gated
+  scan nobody decides stays forever holding the submitted source. Critical/high
+  severity is precisely what gets gated, so the lingering entries hold the most
+  sensitive code. The dict already carried a `created_at` that **nothing ever
+  read** — an expiry was clearly intended and never built.
+
+- **`_ws_pending_events`** is drained only when a WebSocket subscriber connects.
+  A `curl`-driven scan, or a user closing the tab first, leaves its buffer
+  resident forever.
+
+Bounded by **both** count and age, deliberately: a count cap alone lets a quiet
+deployment hold submitted code for the process lifetime, and a TTL alone lets a
+burst spike memory before anything ages out. Defaults 500 entries / 3600 s
+(≈26 MiB worst case, flat), env-overridable. Measured after: 20,000 stores
+retain 500 entries at 0.039 ms amortised per store, with no parallel leak in the
+timestamp map.
+
+Two inverse properties are tested too, because over-eager eviction is the worse
+failure: a result inside its TTL is never dropped (the dashboard fetches
+`GET /scan/{id}` immediately after `POST /scan`), and a pending approval with a
+missing `created_at` is never discarded — no pending human decision is thrown
+away over a malformed field.
+
+Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
+
+### Two live findings from probing a running server
+
+- **SECURITY.md claimed there was no request size cap.** There is:
+  `ScanRequest.code` carries `max_length=50_000`, enforced by Pydantic before any
+  LLM call. Verified live — 50,001 characters returns **HTTP 422** at the schema
+  boundary, so an oversized payload never reaches a paid API or trips the
+  breaker. Corrected; the *rate*-limiting gap is real and stays listed.
+- **The fallback fix confirmed end to end without an API key.** With
+  `GROQ_API_KEY` unset, `POST /scan` returns 503 naming
+  `llama-3.1-8b-instant` — `FALLBACK_MODEL`. `run_scanner` uses
+  `MODEL_STRONG` unless overridden, so that model name can only appear if the
+  degradation override reached the real `_call_llm`. Before the fix both attempts
+  would have reported `llama-3.3-70b-versatile`.
+
+Evidence: `docs/audit-evidence/t2/live-degradation-and-size-cap.txt`.
+
+### RAG retrieval is NOT a bottleneck — measured, no action taken
+
+Retrieval runs on the event loop for every scan, so it was worth measuring:
+
+```
+small snippet (52 B)   median 0.160 ms   max 0.288 ms
+5 KB file              median 0.369 ms   max 0.703 ms
+50 KB (the code cap)   median 2.142 ms   max 6.099 ms
+```
+
+Against an LLM call measured in hundreds of milliseconds to seconds, that is
+noise. Recorded as a **negative result** so nobody "optimises" it later without
+a number — see the standing rule below.
+
 ### Frontend dependency advisories — found, triaged, NOT actioned
 
 18 advisories (16 high, 2 moderate) in `next` and its nested `postcss`. `next`
@@ -561,7 +640,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 190 passed
+pytest tests/                                -> 204 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -585,7 +664,8 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `pipeline-defects.txt`, `benchmark-defect.txt`, `audit-performance.txt`,
 `audit-endpoint-performance.txt`, `scan-response-fabrications.txt`,
 `frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
-`resilient-fallback-defect.txt`.
+`resilient-fallback-defect.txt`, `scan-state-retention.txt`,
+`live-degradation-and-size-cap.txt`.
 
 ---
 
@@ -596,7 +676,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 190 passed
+python -m pytest tests/          # expect 204 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -659,6 +739,10 @@ Blocking first:
 - Do not claim a capability in a commit message before implementing it. This
   happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
   `f3bb8e5`.
+- **Measure before optimising, and record negative results.** RAG retrieval
+  looked like an obvious hot path and measured 0.16–2.1 ms — noise next to an
+  LLM call. The three real performance wins were all found by measurement, not
+  by reading the code and guessing.
 - **Re-derive test counts, do not copy them.** This file has drifted three times
   (58 → 110 → 128 → 150). Run `pytest tests/ -q --collect-only` before writing a
   number anywhere.
@@ -675,4 +759,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `e29eb28` + this update. CI green on runs 21, 22, 23.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `8b07bd8` + this update. CI green on runs 21-25.*

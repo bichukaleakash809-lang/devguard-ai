@@ -1,0 +1,25 @@
+LIVE END-TO-END CONFIRMATION — no API key required
+=================================================
+Real uvicorn on port 8031, GROQ_API_KEY unset, POST /scan.
+Because there is no key, every LLM call raises — which makes this the one
+way to observe the degradation path end to end without paying for it.
+
+--- request size cap (SECURITY.md said there was none) ---
+  code length  50001 (over the 50,000-char cap) -> HTTP 422
+      Invalid scan request: 1 validation error for ScanRequest
+code
+  String should have at most 50000 characters [type=string_too_long, input_value='xxxxxx
+  code length     10 (well under it) -> HTTP 503
+      Scan pipeline failed: [scanner] LLM call failed on model llama-3.1-8b-instant
+
+--- what the 503 names is the DEGRADED model ---
+  run_scanner uses MODEL_STRONG (llama-3.3-70b-versatile) unless an override is
+  passed. The error above names llama-3.1-8b-instant = FALLBACK_MODEL, which can
+  only happen if run_pipeline_resilient's override reached the real _call_llm.
+  Before this fix _invoke discarded the model, so BOTH attempts would have
+  reported llama-3.3-70b-versatile. This is the fallback genuinely degrading,
+  observed on a running server.
+
+--- the error contract holds (contract: bad input -> 422, never a 500) ---
+  oversized payload -> 422, not 500
+  provider failure  -> 503 with a trace_id in the body, not 500

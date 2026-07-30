@@ -37,7 +37,7 @@ Only `main`. There are no released versions and no backported fixes.
 
 ## What is regression-protected
 
-190 tests run on every push in CI, with no API key, no collector and no network
+204 tests run on every push in CI, with no API key, no collector and no network
 (`.github/workflows/ci.yml`). They cover the typed agent boundaries, the audit
 chain's tamper detection, the circuit-breaker state machine, telemetry
 fail-safety, the untrusted-content boundary above, and the `/scan` response
@@ -57,9 +57,17 @@ These are real and should be treated as open:
 - **No authentication on any endpoint.** Anyone who can reach the backend can
   submit a scan, read the audit log, and approve or reject a gated fix. Do not
   expose this to the internet as-is.
-- **No rate limiting or request size cap.** `POST /scan` accepts arbitrary code
-  and forwards it to a paid LLM API, so an open instance is a cost-exhaustion
-  target.
+- **No rate limiting.** `POST /scan` forwards code to a paid LLM API with no
+  per-caller quota, so an open instance is a cost-exhaustion target. A single
+  request's blast radius is bounded (see below) but the request *rate* is not.
+
+  This bullet previously also claimed there was **no request size cap**. That was
+  wrong: `ScanRequest.code` carries `max_length=50_000`, enforced by Pydantic
+  before any LLM call. Verified against a running server — 50,001 characters
+  returns **HTTP 422**, and the rejection happens at the schema boundary, so an
+  oversized payload never reaches a paid API or trips the circuit breaker.
+  Evidence: `docs/audit-evidence/t2/live-degradation-and-size-cap.txt`. Note the
+  cap is on the `code` field, not on total body bytes.
 - **Submitted code is sent to a third party.** Anything pasted into the Scanner
   is transmitted to Groq. Do not submit proprietary or sensitive source.
 - **Prompt injection is mitigated, not solved.** Code under review is untrusted

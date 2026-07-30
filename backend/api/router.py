@@ -108,6 +108,141 @@ _ws_subscribers: dict[str, set[WebSocket]] = {}
 _ws_pending_events: dict[str, list[dict]] = {}  # buffer for events published before a subscriber connects
 _scan_results: dict[str, dict[str, Any]] = {}  # scan_id -> full frontend-shaped result
 
+# ---------------------------------------------------------------------------
+# RETENTION FOR THE THREE IN-MEMORY DICTS ABOVE.
+#
+# All three are keyed by scan_id and all three used to grow without bound:
+#
+#   _scan_results       had NO eviction path anywhere in this file. Every scan
+#                       added an entry and nothing removed it. Each entry holds
+#                       `original_code` AND `fixed_code`, and ScanRequest.code is
+#                       capped at 50,000 characters, so one entry measures ~53
+#                       KiB — 52 MiB at a thousand scans, 521 MiB at ten
+#                       thousand, retained until the process dies. The durable
+#                       record that actually needs to survive is the audit log.
+#   _pending_approvals  is popped on /approve and /reject, but a gated scan that
+#                       nobody decides stays forever holding the submitted
+#                       source. Critical/high is what gets gated, so the entries
+#                       that linger hold the most sensitive code. The dict
+#                       already carried a `created_at` that nothing ever read.
+#   _ws_pending_events  is drained only when a WebSocket subscriber connects. A
+#                       curl-driven scan, or a user who closes the tab first,
+#                       leaves its buffer resident forever.
+#
+# Bounded by BOTH count and age on purpose: a count cap alone lets a quiet
+# deployment hold submitted code for the life of the process, and a TTL alone
+# lets a burst spike memory before anything ages out.
+# ---------------------------------------------------------------------------
+
+#: How many finished scan results to keep for `GET /scan/{scan_id}`. 500 x ~53
+#: KiB worst case is ~26 MiB, which a small container survives. Overridable for
+#: deployments that page back through more history.
+SCAN_RESULT_MAX_ENTRIES = int(os.environ.get("DEVGUARD_SCAN_RESULT_MAX", "500"))
+
+#: How long a finished result stays fetchable. The frontend loads
+#: `GET /scan/{id}` immediately after `POST /scan`, so this only has to outlast a
+#: page load by a wide margin — an hour lets a user leave a tab open and come back.
+SCAN_RESULT_TTL_SECONDS = float(os.environ.get("DEVGUARD_SCAN_RESULT_TTL_S", "3600"))
+
+#: How long an undecided approval gate is held. Long enough for a human to
+#: actually review a critical finding; not so long that abandoned gates
+#: accumulate submitted source. Expiry here discards a *pending* decision, never
+#: a recorded one — the audit log is written at decide time, not at gate time.
+PENDING_APPROVAL_TTL_SECONDS = float(
+    os.environ.get("DEVGUARD_PENDING_APPROVAL_TTL_S", "86400")
+)
+
+#: Cap on buffered WebSocket events per scan. The newest are what a late
+#: subscriber needs — the terminal "done" event is always last.
+WS_BUFFER_MAX_EVENTS = int(os.environ.get("DEVGUARD_WS_BUFFER_MAX", "200"))
+
+#: scan_id -> monotonic timestamp when the result was stored. Separate from
+#: `_scan_results` so the response payload stays exactly the API contract.
+_scan_result_stored_at: dict[str, float] = {}
+
+
+def _remember_scan_result(
+    scan_id: str, result: dict[str, Any], now: Optional[float] = None
+) -> None:
+    """Store a finished result for `GET /scan/{scan_id}`, then sweep."""
+    _scan_results[scan_id] = result
+    _scan_result_stored_at[scan_id] = now if now is not None else time.monotonic()
+    _evict_scan_state()
+
+
+def _buffer_ws_event(scan_id: str, payload: dict[str, Any]) -> None:
+    """Buffer one event for a subscriber that has not connected yet, bounded."""
+    buf = _ws_pending_events.setdefault(scan_id, [])
+    buf.append(payload)
+    if len(buf) > WS_BUFFER_MAX_EVENTS:
+        # Drop from the front: a late subscriber cares about the recent events,
+        # and the terminal "done" event it waits on is always the last one.
+        del buf[: len(buf) - WS_BUFFER_MAX_EVENTS]
+
+
+def _evict_scan_state(
+    max_entries: Optional[int] = None, now: Optional[float] = None
+) -> None:
+    """Drop scan state that is too old or too plentiful to keep.
+
+    Cheap enough to call on every store: it is O(expired) in the common case and
+    only sorts when the count cap is actually exceeded.
+    """
+    cap = SCAN_RESULT_MAX_ENTRIES if max_entries is None else max_entries
+    mono = time.monotonic() if now is None else now
+
+    # 1. Age out results.
+    expired = [
+        sid for sid, stored in _scan_result_stored_at.items()
+        if mono - stored > SCAN_RESULT_TTL_SECONDS
+    ]
+    for sid in expired:
+        _forget_scan(sid)
+
+    # 2. Then trim to the count cap, oldest first.
+    if len(_scan_results) > cap:
+        by_age = sorted(
+            _scan_results,
+            key=lambda sid: _scan_result_stored_at.get(sid, 0.0),
+        )
+        for sid in by_age[: len(_scan_results) - cap]:
+            _forget_scan(sid)
+
+    # 3. Age out undecided approval gates. `created_at` is wall-clock time.
+    #    A missing timestamp is never a reason to discard a pending human
+    #    decision, so a malformed entry is left alone.
+    wall = time.time()
+    for sid, entry in list(_pending_approvals.items()):
+        created = entry.get("created_at")
+        if created is None:
+            continue
+        if wall - created > PENDING_APPROVAL_TTL_SECONDS:
+            logger.info(
+                "Approval gate for scan_id=%s expired after %.0fs undecided; "
+                "discarding the pending state. No audit entry was written for it.",
+                sid, wall - created,
+            )
+            _pending_approvals.pop(sid, None)
+            _forget_scan(sid)
+
+    # 4. Drop event buffers whose scan is no longer known to us at all — nobody
+    #    can subscribe to a scan we have already forgotten.
+    for sid in list(_ws_pending_events):
+        if (
+            sid not in _scan_results
+            and sid not in _pending_approvals
+            and sid not in _ws_subscribers
+        ):
+            _ws_pending_events.pop(sid, None)
+
+
+def _forget_scan(scan_id: str) -> None:
+    """Release every in-memory trace of one scan. The audit log is untouched."""
+    _scan_results.pop(scan_id, None)
+    _scan_result_stored_at.pop(scan_id, None)
+    if scan_id not in _ws_subscribers:
+        _ws_pending_events.pop(scan_id, None)
+
 
 async def _publish_span_event(scan_id: str, payload: dict[str, Any]) -> None:
     """Push a span-completion event to all WS subscribers for this scan.
@@ -116,7 +251,7 @@ async def _publish_span_event(scan_id: str, payload: dict[str, Any]) -> None:
     it can be replayed the instant a subscriber connects."""
     subs = _ws_subscribers.get(scan_id, set())
     if not subs:
-        _ws_pending_events.setdefault(scan_id, []).append(payload)
+        _buffer_ws_event(scan_id, payload)
         return
     dead = set()
     for ws in subs:
@@ -474,7 +609,7 @@ async def _finalize_or_gate(
         status="pending_approval" if gated else "complete",
         finalized_entry=finalized_entry,
     )
-    _scan_results[scan_id] = frontend_result
+    _remember_scan_result(scan_id, frontend_result)
 
     if gated:
         _pending_approvals[scan_id] = {
