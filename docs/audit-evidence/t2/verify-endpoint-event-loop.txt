@@ -1,0 +1,46 @@
+============================================================================
+GET /audit-log/verify RAN ITS CHAIN WALK ON THE EVENT LOOP
+============================================================================
+
+FastAPI runs `async def` handlers on the loop, so synchronous work inside one
+stalls EVERY concurrent request, not just the caller's. Single-worker uvicorn
+(the documented way to run this) has one loop, so it is a whole-service stall.
+
+verify_chain() is inherently O(N) — verifying a chain means hashing every
+record. The cost is not the bug; paying it on the loop is.
+
+  entries    file size   verify_chain()
+      100      0.03 MB         0.657 ms
+    1,000      0.29 MB         6.309 ms
+   10,000      2.88 MB        68.289 ms
+   50,000     14.44 MB       354.417 ms
+
+The audit log only ever grows, so this degraded monotonically for the life of
+a deployment. One compliance check against a 50k-entry log froze the loop for
+~350 ms.
+
+============================================================================
+MEASURED LOOP STARVATION — a 1 ms ticker running alongside the handler
+============================================================================
+
+The ticker takes its baseline BEFORE the work starts, then records the longest
+gap it observes. A blocking handler parks the loop for essentially its whole
+duration; an off-thread one lets the ticker keep its ~1 ms cadence.
+
+  BEFORE (sync on the loop)    handler    53.8 ms   loop blocked    54.9 ms
+  AFTER  (asyncio.to_thread)   handler    61.5 ms   loop blocked     7.7 ms
+
+  -> the walk still costs the same; the loop is now free for its duration.
+
+============================================================================
+THE OTHER SYNC FILE READ ON THE REQUEST PATH — measured, NO action taken
+============================================================================
+
+_load_benchmark_artifact() does a synchronous open() on every /scan. Measured
+before assuming it mattered:
+  artifact missing (normal)    median 0.0014 ms   p99 0.0027 ms
+  artifact present             median 0.0105 ms   p99 0.0295 ms
+
+  -> 1-10 microseconds. Left alone. Recorded so nobody 'fixes' it on a hunch.
+
+ALL ASSERTIONS PASSED

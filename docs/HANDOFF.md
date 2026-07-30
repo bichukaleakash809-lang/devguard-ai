@@ -24,12 +24,12 @@ Do **not** start T3 until the human decides how to handle the blocked three.
 
 | # | Priority | Status |
 |---|---|---|
-| 1 | Performance | Three real problems found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`); `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`); unbounded in-memory scan state, 53.4 KiB leaked per scan → 26 MiB flat. RAG retrieval measured and found NOT to be a bottleneck (0.16–2.1 ms) — recorded as a negative result. |
+| 1 | Performance | Four real problems found, measured before/after, fixed: audit append O(N) → flat (`0c7ac2a`); `GET /audit-log` full-file parse → paginated, 311 ms → 14 ms at 50k (`4e3d9b2`); unbounded in-memory scan state, 53.4 KiB leaked per scan → 26 MiB flat; `GET /audit-log/verify` blocking the event loop for 354 ms at 50k entries → off-thread. RAG retrieval measured and found NOT to be a bottleneck (0.16–2.1 ms) — recorded as a negative result. |
 | 2 | Scanner / Fixer / Validator | Reflection loop, benchmark harness, the `/scan` response contract and the resilience degradation path all had proven defects, all fixed failing-test-first (`0a7341d`, `7678d26`, `296f37d`, and this phase). Orchestration is covered end to end without a key; **model judgement remains unmeasurable** — open issue 2. |
 | 3 | RAG | Determinism and relevance fixed (`9716701`), 13 regression tests. The pinned backends are both unimportable — reported, **not** actioned (open issue 4, needs approval). |
 | 4 | Production readiness | Every README command verified in a fresh clone; DEPLOYMENT.md corrected; four unsupported doc claims removed (`90dd6fb`). |
 | 5 | Security hardening | Injection boundary, error surfacing, five fabrications removed, model-authored-measurement hole closed, **critical-severity safety floor fixed — it failed open on any casing variance**. `next` advisories triaged, **not** actioned (open issue 9, needs approval). |
-| 6 | Test coverage | 58 → 204, contract and regression tests throughout. |
+| 6 | Test coverage | 58 → 209, contract and regression tests throughout. |
 
 ---
 
@@ -218,7 +218,7 @@ it reaches the Validator, since it inherits the taint. 12 tests.
 **Mitigated, not solved** — SECURITY.md says so explicitly; the residual
 false-negative risk is real and stated.
 
-**Test inventory — 204 passing**, all with no API key, no collector, no network.
+**Test inventory — 209 passing**, all with no API key, no collector, no network.
 (Per-file counts below were last de-drifted at HEAD; re-derive with
 `pytest tests/ -q --collect-only` rather than trusting this list.)
 - `test_schema_contracts.py` (20) — the typed-boundary claim actually enforced:
@@ -253,6 +253,9 @@ false-negative risk is real and stated.
   requested
 - `test_scan_state_retention.py` (14) — the three in-memory dicts are bounded by
   count and age, and eviction never drops a live result or a pending approval
+- `test_endpoint_event_loop.py` (5) — measures loop starvation directly, so a
+  handler that reintroduces synchronous file I/O fails rather than just getting
+  slower
 
 **`make doctor`** (contract §4.3) reports what it observed, distinguishes
 OPTIONAL from MISSING, and exits 0 only when every required check passes.
@@ -513,6 +516,49 @@ away over a malformed field.
 
 Evidence: `docs/audit-evidence/t2/scan-state-retention.txt`. **Tests 190 → 204.**
 
+### `GET /audit-log/verify` walked the chain on the event loop
+
+`GET /audit-log` was moved off-thread earlier; **this endpoint was missed.**
+FastAPI runs `async def` handlers on the loop, so a synchronous walk stalled every
+concurrent scan, SLO poll and WebSocket frame for its whole duration — and
+single-worker `uvicorn` (the documented way to run this) has exactly one loop, so
+it was a whole-service stall.
+
+`verify_chain()` is inherently O(N) — verifying a hash chain means hashing every
+record, and that is not reducible. The cost was never the bug; paying it on the
+loop was.
+
+```
+  entries    file size   verify_chain()
+      100      0.03 MB         0.657 ms
+    1,000      0.29 MB         6.309 ms
+   10,000      2.88 MB        68.289 ms
+   50,000     14.44 MB       354.417 ms
+```
+
+The audit log only grows, so this degraded monotonically for a deployment's
+whole life. Measured with a 1 ms ticker running alongside the handler:
+
+```
+  BEFORE (sync on the loop)    handler  53.8 ms   loop blocked  54.9 ms
+  AFTER  (asyncio.to_thread)   handler  61.5 ms   loop blocked   7.7 ms
+```
+
+**A test-harness lesson worth keeping.** The starvation harness passed against
+the known-blocking handler on its first run — vacuously. The ticker's baseline
+`last = perf_counter()` was taken *after* the blocking call had already finished,
+because `await coro` runs a coroutine inline and the ticker was never scheduled.
+It now waits on an `asyncio.Event` and discards startup jitter before the work
+begins. A green test against a defect you have already measured means the harness
+is wrong, not the code.
+
+`_load_benchmark_artifact()` — the other sync `open()` on the `/scan` path — was
+measured too: **0.0014 ms** missing, **0.0105 ms** present. Left alone, recorded
+so nobody "fixes" it on a hunch.
+
+Evidence: `docs/audit-evidence/t2/verify-endpoint-event-loop.txt`.
+**Tests 204 → 209.**
+
 ### Two live findings from probing a running server
 
 - **SECURITY.md claimed there was no request size cap.** There is:
@@ -640,7 +686,7 @@ Re-run every line before reporting anything green. Last observed at `90dd6fb`:
 
 ```
 import backend.main with GROQ_API_KEY unset  -> PASS
-pytest tests/                                -> 204 passed
+pytest tests/                                -> 209 passed
 scripts/verify_otel.py                       -> PASSED (OTLP + context + log correlation)
 make doctor                                  -> exit 0, all required checks passed
 npx tsc --noEmit                             -> clean
@@ -665,7 +711,7 @@ Evidence on disk: `docs/audit-evidence/t2/` —
 `audit-endpoint-performance.txt`, `scan-response-fabrications.txt`,
 `frontend-dependency-advisories.txt`, `severity-floor-defect.txt`,
 `resilient-fallback-defect.txt`, `scan-state-retention.txt`,
-`live-degradation-and-size-cap.txt`.
+`live-degradation-and-size-cap.txt`, `verify-endpoint-event-loop.txt`.
 
 ---
 
@@ -676,7 +722,7 @@ git checkout claude/track-t0-audit-evgu8j
 
 # Re-verify the whole T2 surface at any time:
 make doctor
-python -m pytest tests/          # expect 204 passed
+python -m pytest tests/          # expect 209 passed
 python scripts/verify_otel.py    # expect PASSED
 (cd frontend && npx tsc --noEmit && npm run build && npm run lint)
 
@@ -739,6 +785,11 @@ Blocking first:
 - Do not claim a capability in a commit message before implementing it. This
   happened once in T2 phase 2 (`--require-agent-spans`) and was corrected in
   `f3bb8e5`.
+- **A green test against a defect you have already measured means the harness is
+  wrong.** The event-loop starvation harness passed against the known-blocking
+  handler because its baseline was taken after the blocking call finished. Verify
+  a new harness fails on the unfixed code before trusting it to pass on the fixed
+  code.
 - **Measure before optimising, and record negative results.** RAG retrieval
   looked like an obvious hot path and measured 0.16–2.1 ms — noise next to an
   LLM call. The three real performance wins were all found by measurement, not
@@ -759,4 +810,4 @@ Blocking first:
 
 ---
 
-*Last updated: 2026-07-30, post-T2 hardening. HEAD: `8b07bd8` + this update. CI green on runs 21-25.*
+*Last updated: 2026-07-30, post-T2 hardening. HEAD: `77e3b29` + this update. CI green on runs 21-26.*

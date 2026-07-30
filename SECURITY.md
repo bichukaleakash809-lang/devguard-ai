@@ -37,7 +37,7 @@ Only `main`. There are no released versions and no backported fixes.
 
 ## What is regression-protected
 
-204 tests run on every push in CI, with no API key, no collector and no network
+209 tests run on every push in CI, with no API key, no collector and no network
 (`.github/workflows/ci.yml`). They cover the typed agent boundaries, the audit
 chain's tamper detection, the circuit-breaker state machine, telemetry
 fail-safety, the untrusted-content boundary above, and the `/scan` response
