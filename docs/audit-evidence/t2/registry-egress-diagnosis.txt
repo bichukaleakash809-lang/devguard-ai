@@ -1,0 +1,105 @@
+Registry egress block — differential diagnosis
+==============================================
+Captured: 2026-07-30T00:57:38Z
+
+CONCLUSION
+----------
+The failing component is the CLAUDE EXECUTION ENVIRONMENT's egress policy,
+enforced by the policy gateway that its local HTTPS proxy relays to. It runs a
+DEFAULT-DENY ALLOWLIST. Container-registry *API* hostnames are on the allowlist;
+the *blob/CDN* hostnames those registries redirect layer downloads to are not.
+So `docker pull` authenticates and resolves a manifest, then fails when it
+fetches the layers.
+
+This is NOT any of:
+  - Docker Hub registry access ..... their API answers normally (401/404), and
+                                     the pull got as far as requesting blobs,
+                                     so manifest + auth both succeeded
+  - GitHub permissions ............. api.github.com 200; commits push; the
+                                     Actions API works; even ghcr.io is 301
+  - SigNoz permissions ............. no SigNoz software is ever contacted. The
+                                     TLS tunnel is refused before any request
+                                     is sent, so no credential is involved
+  - a local firewall ............... DNS resolves, the local proxy accepts the
+                                     connection; the refusal comes from the
+                                     UPSTREAM gateway
+
+EVIDENCE 1 — the exact failure layer
+------------------------------------
+DNS resolves for both the allowed and the denied host:
+    production.cloudfront.docker.com -> 18.154.101.85
+    registry-1.docker.io             -> 34.235.67.98
+
+curl -v shows the request reaching the local proxy and issuing CONNECT:
+    * Uses proxy env variable https_proxy == 'http://127.0.0.1:37609'
+    * Connected to 127.0.0.1 (127.0.0.1) port 37609
+    * Establish HTTP proxy tunnel to production.cloudfront.docker.com:443
+    > CONNECT production.cloudfront.docker.com:443 HTTP/1.1
+
+The local proxy's own status endpoint records who refused it:
+    kind   = connect_rejected
+    detail = gateway answered 403 to CONNECT (policy denial or upstream failure)
+    host   = production.cloudfront.docker.com:443
+
+So: DNS OK, TCP to proxy OK, and the failure is precisely at CONNECT
+AUTHORIZATION by the upstream gateway. Nothing downstream is reached.
+
+EVIDENCE 2 — registry API hosts are ALLOWED (this is the key finding)
+--------------------------------------------------------------------
+Tested with curl, bypassing docker entirely. 401/404 mean reachable — those are
+normal unauthenticated responses, not failures:
+
+    registry-1.docker.io/v2/              HTTP 401   reachable
+    index.docker.io/v2/                   HTTP 401   reachable
+    auth.docker.io                        HTTP 404   reachable
+    ghcr.io                               HTTP 301   reachable
+    production.cloudfront.docker.com      HTTP 000   BLOCKED
+    pkg-containers.githubusercontent.com  HTTP 000   BLOCKED
+
+The pattern holds for both registries tested: API host allowed, blob host denied.
+
+EVIDENCE 3 — it is default-deny, not Docker-specific
+----------------------------------------------------
+    api.github.com                 HTTP 200   allowed
+    pypi.org                       HTTP 200   allowed
+    files.pythonhosted.org         HTTP 200   allowed
+    registry.npmjs.org             HTTP 200   allowed
+
+    example.com                    BLOCKED
+    signoz.io                      BLOCKED
+    ingest.us.signoz.cloud         BLOCKED
+    quay.io                        BLOCKED
+    registry.k8s.io                BLOCKED
+    huggingface.co                 BLOCKED
+    <arbitrary>.cloudfront.net     BLOCKED
+
+example.com being blocked proves the policy is an allowlist with default deny.
+Docker is not being singled out; it is simply not fully covered.
+
+CONSEQUENCE FOR T2
+------------------
+Docker itself is fine — the daemon was not running and was started successfully
+this session (Server Version 29.3.1, overlayfs, buildkit). Resources are
+adequate (21 GB disk, 15 GB RAM). The ONLY thing preventing
+`docker compose --profile obs up` is that layer blobs cannot be downloaded.
+
+SMALLEST FIX
+------------
+Allowlist the blob/CDN host for whichever registry is preferred:
+
+    production.cloudfront.docker.com      (Docker Hub — API hosts already allowed)
+ or pkg-containers.githubusercontent.com  (GHCR — ghcr.io already allowed)
+
+Either one unblocks image pulls on its own. Nothing else needs to change:
+otel-collector-config.yaml already exists, so the obs profile becomes runnable
+immediately.
+
+Separately, huggingface.co being blocked explains why the semantic RAG embedder
+could never download all-MiniLM-L6-v2 — though that path is independently broken
+by a dependency pin conflict (see rag-dependency-finding.txt).
+
+REPRODUCTION
+------------
+    curl -s -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/
+    curl -s -o /dev/null -w '%{http_code}' https://production.cloudfront.docker.com/
+    curl -sS "$HTTPS_PROXY/__agentproxy/status" | python3 -m json.tool

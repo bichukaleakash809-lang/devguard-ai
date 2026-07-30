@@ -294,10 +294,47 @@ ingest.us.signoz.cloud, signoz.io     (SigNoz Cloud — also blocked)
 
 Raw proxy-recorded evidence: **`docs/audit-evidence/t2/registry-egress-block.txt`**
 
-**Smallest fix:** allowlist `registry-1.docker.io`, `auth.docker.io`, and
-`production.cloudfront.docker.com`. Resources are adequate (21 GB disk, 15 GB
-RAM vs SigNoz's ~4–6 GB). Then `docker compose --profile obs up` works
-immediately, since the collector config now exists.
+**DIAGNOSED PRECISELY** — see `docs/audit-evidence/t2/registry-egress-diagnosis.txt`.
+
+The failing component is the **Claude execution environment's egress policy**,
+enforced by the gateway its local HTTPS proxy relays to. It is a **default-deny
+allowlist**, and the shape of the gap is specific:
+
+| host | result |
+|---|---|
+| `registry-1.docker.io/v2/` | HTTP 401 — **allowed** (normal unauth response) |
+| `index.docker.io/v2/` | HTTP 401 — **allowed** |
+| `auth.docker.io` | HTTP 404 — **allowed** |
+| `ghcr.io` | HTTP 301 — **allowed** |
+| `production.cloudfront.docker.com` | **BLOCKED** (Docker Hub blob CDN) |
+| `pkg-containers.githubusercontent.com` | **BLOCKED** (GHCR blob host) |
+
+Registry **API** hosts are allowlisted; the **blob/CDN** hosts they redirect
+layer downloads to are not. So `docker pull` authenticates, resolves the
+manifest, then fails fetching layers. `example.com` is also blocked, which
+proves default-deny rather than Docker being singled out.
+
+Failure layer is exactly CONNECT authorization: DNS resolves, the local proxy
+accepts the connection, and the **upstream gateway answers 403 to CONNECT**
+(`kind=connect_rejected`). Nothing downstream is ever reached.
+
+**Ruled out with evidence:** Docker Hub access (their API answers normally),
+GitHub permissions (`api.github.com` 200, pushes work, Actions API works),
+SigNoz permissions (no SigNoz software is ever contacted — the tunnel is refused
+before any request, so no credential is involved), and a local firewall (the
+refusal is from the upstream gateway, not locally).
+
+**Smallest fix — ONE host:** allowlist `production.cloudfront.docker.com`
+(Docker Hub; its API hosts are already allowed) **or**
+`pkg-containers.githubusercontent.com` (GHCR; `ghcr.io` already allowed). Either
+alone unblocks image pulls. Docker itself is fine — daemon started successfully
+this session (29.3.1), and resources are adequate (21 GB disk, 15 GB RAM vs
+SigNoz's ~4–6 GB). `otel-collector-config.yaml` already exists, so
+`docker compose --profile obs up` becomes runnable immediately.
+
+Side note: `huggingface.co` is also blocked, which explains why the semantic RAG
+embedder could never fetch `all-MiniLM-L6-v2` — though that path is independently
+broken by a dependency pin conflict.
 
 ---
 
