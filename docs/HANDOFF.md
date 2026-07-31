@@ -1337,6 +1337,86 @@ Continuing past this point would mean inventing work. Do not.
 
 ---
 
+## CONTRACT SET CORRECTED — 05_DATAHUB_MASTER.md FOUND
+
+**I previously reported T6 as blocked because `01_PLATFORM_MASTER.md` §8 is an
+empty `[ SLOT — PASTE … ]` placeholder. That report was wrong.** The DataHub
+contract exists as `docs/05_DATAHUB_MASTER.md` — it was committed to
+**`origin/main`**, and this feature branch was created before it landed, so it
+was invisible from here.
+
+Found by searching every ref rather than trusting the working tree:
+
+```
+$ comm -23 <(git ls-tree -r --name-only origin/main | sort) \
+           <(git ls-tree -r --name-only HEAD | sort)
+docs/05_DATAHUB_MASTER.md
+frontend/.env.local
+```
+
+Only `05_DATAHUB_MASTER.md` was imported (`git checkout origin/main -- …`).
+**`frontend/.env.local` was deliberately NOT taken back**: T1b untracked it and
+CI's secret scan fails if it returns. Checked before deciding — it holds only
+`NEXT_PUBLIC_*` URLs, no credential, and those are inlined into the client bundle
+anyway; it was flagged for baking a dead host into the build.
+
+`origin/main` is otherwise far **behind** this branch (140 files, ~25k deletions),
+so it must not be merged.
+
+---
+
+## TRACK ORDER CORRECTED — D0, NOT T3
+
+The five documents are one combined contract, and read together they say the next
+action is **D0 of the DataHub contract**, not T3. Three independent reasons:
+
+1. **T3 is the first thing the contract cuts; the DataHub write-back is never
+   cut.** `03_CORE_CONTRACT.md` §2: *"Cut order under time pressure: UI ceiling →
+   second scenario → OSS PR → UI polish. **Never** cut: the honesty pass, the
+   Apache-2.0 licence, the DataHub write-back, or the submission package."* And
+   `01_PLATFORM_MASTER` §10: *"Cut order when time runs short: **design-system
+   refactor depth** → …"*. Executing a cuttable refactor ahead of never-cut work
+   inverts the contract's own priority.
+2. **05 has a hard STOP rule that supersedes.** §0: *"Execute **D0 only**.
+   Report. Wait for the human."* §21: *"**Then STOP.** Do not begin D1 until the
+   human confirms the repo path and the substrate."* `01_PLATFORM_MASTER` §8 says
+   the pasted contract binds *"unless it is stricter"* — 05 is stricter.
+3. **The calendar.** 05 §14 dates D0 to Jul 28 and **MWP LOCK to Aug 3**. Today
+   is **Jul 31**. D0 had not been executed at all. §17 also requires a **PATH A
+   (new public repo) vs PATH B** decision that gates everything — including
+   whether T3's refactor in *this* repo is worth doing.
+
+---
+
+## D0 EXECUTED — STOPPED AT THE MANDATED GATE
+
+Artifacts: `docs/v2/` (`EXISTING_SYSTEM_AUDIT.md`, `JUDGING_MATRIX.md`,
+`SUBMISSION_CHECKLIST.md`, `INTEGRATION_LOG.md`, `RISKS.md`, `HANDOFF.md`) and
+`versions.env`.
+
+**Environment verdict (§21.2):** 15 GiB RAM, **16 GiB free disk**, 4 CPUs.
+DataHub Core is feasible — but **disk, not RAM, is the binding constraint**, and
+it **cannot coexist with the SigNoz stack** (3.9 GiB of images) plus a Postgres
+substrate. The two demos cannot both be live in one session without pruning.
+
+**Everything §5 needs is reachable** — and notably *not* subject to the egress
+denial that blocks Groq: `mcp-server-datahub 0.6.0` (≥0.5.0, so mutation tools
+are available), `datahub-agent-context 1.6.0.16`, `acryl-datahub 1.6.0.16`, uvx,
+npx, datahub-skills repo HTTP 200. DataHub images measured at ~1.4 GB compressed
+for the core.
+
+**`DATAHUB_VERSION` is deliberately left blank** in `versions.env`. §5 requires a
+version that ships Context Documents, **verified** — filling it from
+documentation instead of a running instance would be exactly the fabrication
+LAW 3 forbids. §21.3 (stand up DataHub Core, dump the tool list) is the unfinished
+part of D0 and is the next command.
+
+**Anchored self-score (§13), D0:** Use of DataHub **0** · Technical Execution
+**3** · Originality **0** · Real-World Usefulness **1** · Submission Quality
+**1**. Criteria 1 and 3 are at zero because no DataHub call has ever been made.
+
+---
+
 ## CURRENT BLOCKER — READ THIS FIRST
 
 **`api.groq.com` is denied by the execution environment's egress policy.** It is
