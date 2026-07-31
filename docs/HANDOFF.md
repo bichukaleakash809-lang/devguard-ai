@@ -1337,6 +1337,52 @@ Continuing past this point would mean inventing work. Do not.
 
 ---
 
+## D1 COMPLETE — THE DATAHUB WRITE PATH IS PROVEN
+
+Evidence: **`evidence/d1/`** (every raw response) and **`evidence/d1/README.md`**.
+
+**DataHub Core v1.6.0 is up**, version read back from the running instance and
+pinned in `versions.env`. MCP connected; **18-tool list dumped and committed**.
+
+**Every §8 write path works** — incident raise + resolve (read back ACTIVE=0,
+RESOLVED=1), column-level tag, column-level description, Context Document, and
+`devguard.*` structured properties (definitions registered, values set). LAW 4 is
+satisfied: nothing in §8 has to change.
+
+**Four contract-vs-live discrepancies found; the live server wins each time**
+(§5), all logged as §16 contribution candidates:
+
+1. `updateIncidentStatus` takes **`IncidentStatusInput!`**, not
+   `UpdateIncidentStatusInput!` — §5's signature is wrong.
+2. **There is no `Runbook` document type.** §8 artifact 2 names it explicitly;
+   the live enum is `Insight, Decision, FAQ, Analysis, Summary, Recommendation,
+   Note, Context`. DevGuard will use **`Analysis`** as §8's "nearest honest
+   alternative", keeping "runbook" in the title/body where it is descriptive
+   rather than a false schema claim.
+3. A **tag must exist before it can be applied** — same trap §5 documents for
+   structured properties, but undocumented for tags.
+4. `add_structured_properties` needs **full URNs as keys** and **list values**
+   even at `SINGLE` cardinality.
+
+**Two infrastructure findings worth carrying forward:**
+
+* **DataHub images are `acryldata/*`, not `linkedin/*`.** The latter's newest
+  semver tag is v0.13.0 — pinning from it silently gets a 2023 build.
+* **SystemUpdate crash-loops on a constrained disk with an unactionable error.**
+  `Failed Step 8/38: BuildIndicesStep` with a bare OpenSearch stack trace; the
+  real cause was a **persistent `cluster.blocks.create_index: true`** latched by
+  the flood-stage watermark, visible only from OpenSearch directly. Note `df`
+  reported 82% while OpenSearch computed **97%** — in a per-session-allowance
+  sandbox, `df` understates pressure and OpenSearch's number is the one that acts.
+
+**NOT done, and not claimed:** the substrate is **written but never run**.
+`substrate/` and `recipes/` exist; §3's hard gate ("lineage ingested from the
+substrate, provably") is **unmet**, and `docs/v2/SUBSTRATE.md` is deliberately
+absent because its required sentence would currently be false. The D1 credential
+was `__datahub_system`, **not** the §11.4 least-privilege service account.
+
+---
+
 ## CONTRACT SET CORRECTED — 05_DATAHUB_MASTER.md FOUND
 
 **I previously reported T6 as blocked because `01_PLATFORM_MASTER.md` §8 is an

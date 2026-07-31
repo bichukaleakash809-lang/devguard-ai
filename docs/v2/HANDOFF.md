@@ -6,59 +6,58 @@ Assume the next session has zero memory of this one.
 
 ## Current day
 
-**D0** — executed as far as it can go without a human decision. **STOPPED at the
-§0 / §21 gate**, which is mandatory: *"Execute D0 only. Report. Wait for the
-human. Do not begin D1 without explicit approval."*
+**D1 — the write-path gate is MET.** D0.3 (stand up DataHub, dump the tool list)
+was finished first, since D1 depends on it.
 
-Note the calendar: §14 dates D0 to Jul 28 and MWP LOCK to Aug 3. **Today is
-Jul 31.** D0 is running three days late and D1–D3 have not happened.
+Calendar: §14 dates D0 to Jul 28 and **MWP LOCK to Aug 3**. Today is **Jul 31**.
+D0+D1 are done; **D2–D3 (substrate ingestion) are not**.
 
 ## What is green
 
-* Repository audited against the combined contract — `docs/v2/EXISTING_SYSTEM_AUDIT.md`
-* **306 tests passing**, CI green on 4 jobs
-* Environment measured: 15 GiB RAM, 16 GiB free disk, 4 CPUs, Docker 29.3.1
-* **DataHub images are reachable** and sized (~1.4 GB compressed for the core)
-* **All §5 tooling is reachable**: `mcp-server-datahub 0.6.0` (≥0.5.0 ✓),
-  `datahub-agent-context 1.6.0.16`, `acryl-datahub 1.6.0.16`, uvx, npx,
-  datahub-skills repo HTTP 200
-* `versions.env` created with everything that could be honestly resolved
-* Skeletons written: `JUDGING_MATRIX.md`, `SUBMISSION_CHECKLIST.md` (all ❌),
-  `INTEGRATION_LOG.md`, `RISKS.md`, this file
+* **DataHub Core v1.6.0 running and healthy** — GMS + frontend healthy, version
+  read back from the instance (`059a36c0b035…`), not from docs.
+  `versions.env` `DATAHUB_VERSION` is now filled from that reading.
+* **MCP connected; tool list dumped and committed** — `evidence/d0/mcp-tool-list.json`,
+  18 tools, plus full input schemas in `mcp-tool-schemas.json`.
+* **EVERY §8 WRITE PATH PROVEN with captured raw responses** (`evidence/d1/`):
+  * `raiseIncident` → real incident URN
+  * `updateIncidentStatus(RESOLVED)` → read back ACTIVE=0, RESOLVED=1
+  * `add_tags` on a **column** → success
+  * `update_description` on a **column** → success
+  * `save_document` → real document URN
+  * `devguard.*` structured property **definitions registered**, values set
+* 306 backend tests still pass; nothing in T0–T2 was touched.
 
 ## What is red
 
-* **`api.groq.com` unreachable** — external egress denial, blocks every live LLM
-  path. Not a code defect. `docs/TODO-BLOCKED.md`
-* **DataHub Core has NOT been stood up.** §21.3 is unfinished: no tool list has
-  been dumped, so `DATAHUB_VERSION` is deliberately blank in `versions.env`
-* **No DataHub call has ever been made** — Criterion 1 self-scores **0**
-* T2 §6.3 remains incomplete (four-agent trace)
+* **Substrate NOT ingested.** `substrate/` (Postgres compose + seed SQL + dbt
+  project + ML training script) and `recipes/*.yml` are **written but never run**.
+  §3's hard gate — *"lineage in DataHub is ingested from the substrate,
+  provably"* — is **NOT met**, and `docs/v2/SUBSTRATE.md` is deliberately not
+  written yet because its required sentence would be false.
+* **No least-privilege service account.** D1 used
+  `urn:li:corpuser:__datahub_system` (manageIngestion + managePolicies) — the
+  opposite of §11.4. Scoped account + Access Policies still to configure.
+* **`api.groq.com` still unreachable** — blocks every LLM-backed agent in §6.
+* **Disk: ~6 GB free.** DataHub is using ~11 GB of images. The substrate Postgres
+  and dbt still have to fit. SigNoz is stopped (volumes preserved) to make room.
 
 ## The exact next command
 
-Blocked on a human decision first (§17 PATH A vs PATH B, and §3 substrate). Once
-that is given, D0.3 is:
-
 ```bash
-# 1. free disk — DataHub Core and the SigNoz stack do not fit together
-docker compose -f signoz/deploy/docker-compose.yaml down
-docker image prune -af
-
-# 2. bring up DataHub Core, pinned, then record the REAL version into versions.env
-#    (do not fill DATAHUB_VERSION from documentation — read it from the instance)
-
-# 3. connect the MCP server and dump the tool list to disk, committed
-uvx mcp-server-datahub@0.6.0     # env: DATAHUB_GMS_URL, DATAHUB_GMS_TOKEN
+docker compose -f substrate/docker-compose.yml up -d      # real Postgres, port 5433
+cd substrate/dbt && dbt run                                # produces target/manifest.json
+datahub ingest -c recipes/postgres.yml
+datahub ingest -c recipes/dbt.yml                          # THIS is what makes lineage real
 ```
+
+Then, and only then, write `docs/v2/SUBSTRATE.md` asserting *"All hero-path
+lineage was ingested from the running stack. No lineage was hand-authored."*
 
 ## Open questions for the human
 
-1. **PATH A (new public repo) or PATH B (evolve this one)?** §17 defaults to A
-   with a one-working-day carry-over cap. This decision gates everything.
-2. **Substrate confirmation** (§3): Postgres + dbt Core + a trivial scikit-learn
-   model, per the contract's table?
-3. **Is `api.groq.com` going to be allowlisted?** If not, the §6 agent roster can
-   be built and mock-tested but never demonstrated, and that changes what is
-   worth building.
-4. **Scope, given the slip.** Three days to MWP lock with D1–D3 outstanding.
+1. **Disk.** DataHub + substrate + SigNoz do not fit together. Confirm SigNoz
+   stays down during DataHub work.
+2. **`api.groq.com`** — still blocked. Every §6 LLM agent is buildable but not
+   demonstrable until it is allowlisted.
+3. **Scope, given the slip.** Three days to MWP lock with D2–D3 outstanding.

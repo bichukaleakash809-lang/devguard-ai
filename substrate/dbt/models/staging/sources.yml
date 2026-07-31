@@ -1,0 +1,16 @@
+version: 2
+sources:
+  - name: raw
+    schema: raw
+    description: Raw application tables loaded into the substrate Postgres.
+    tables:
+      - name: users
+        description: Raw user records.
+        columns:
+          - name: user_id
+            description: >
+              Primary identifier for a user. THIS is the column the hero loop
+              renames to customer_id; everything below it in this project depends
+              on the name.
+      - name: orders
+        description: Raw order events.

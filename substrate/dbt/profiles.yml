@@ -1,0 +1,15 @@
+# Committed on purpose: no secrets here. These are local substrate credentials
+# for a throwaway Postgres that holds only generated rows (§11.8 — .env.example
+# only, never a real token).
+devguard_substrate:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('SUBSTRATE_PG_HOST', 'localhost') }}"
+      port: "{{ env_var('SUBSTRATE_PG_PORT', '5433') | int }}"
+      user: "{{ env_var('SUBSTRATE_PG_USER', 'devguard') }}"
+      password: "{{ env_var('SUBSTRATE_PG_PASSWORD', 'devguard') }}"
+      dbname: "{{ env_var('SUBSTRATE_PG_DB', 'devguard') }}"
+      schema: analytics
+      threads: 4
