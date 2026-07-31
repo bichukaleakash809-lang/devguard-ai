@@ -1337,6 +1337,54 @@ Continuing past this point would mean inventing work. Do not.
 
 ---
 
+## D2 COMPLETE — REAL SUBSTRATE, AND LINEAGE PROVEN AUTO-GENERATED
+
+Evidence: **`evidence/d2/`** · gate document: **`docs/v2/SUBSTRATE.md`**
+
+**Substrate is real and running.** PostgreSQL 16 (:5433) with `raw.users` 2,000
+rows and `raw.orders` 20,000 rows. dbt Core 1.12.0 runs clean —
+`PASS=3 WARN=0 ERROR=0` — building `user_order_features` with 1,715 rows. A real
+scikit-learn model trains on it: test accuracy **0.7995**.
+
+**Both ingestions succeeded:** postgres **63 events, 0 failures, 0 warnings**;
+dbt **20 events, 0 failures**, 1 cosmetic warning.
+
+**§3's hard gate is met — the lineage is provably NOT hand-authored**, on three
+independent checks:
+
+1. `grep` finds **no** lineage-authoring API (`upstreamLineage`,
+   `FineGrainedLineage`, `emit_lineage`, …) anywhere in `substrate/`, `recipes/`
+   or `backend/`.
+2. **The lineage encodes transformations only a SQL parser could know.**
+   `stg_orders.amount_cents` fans out to **both** `lifetime_value_cents` (`sum`)
+   **and** `avg_order_cents` (`avg`); `status` becomes `refund_count` via a
+   `CASE WHEN`; `order_id` becomes `order_count` via `count`. No naming heuristic
+   yields that. DataHub reports `confidenceScore 0.9` — its SQL parser's value;
+   hand-authored lineage is emitted at 1.0.
+3. **The full chain resolves with column-level edges at every hop:**
+   `raw.users`→`stg_users` (5), `raw.orders`→`stg_orders` (5), both →
+   `user_order_features` (7).
+
+**A defect in my own code, found and fixed:** the first ML training run reported
+**test accuracy 1.0000** — because `refund_count` was both a feature *and* the
+thing the label was derived from. That is label leakage, and reporting it would
+have been a LAW 3 violation against our own numbers. Feature removed; the honest
+figure is **0.7995**.
+
+**NOT claimed:** the DataHub UI lineage **graph** did not render upstream nodes in
+the captured screenshot (graph-index lag). The lineage is proven **via the API**,
+and `SUBSTRATE.md` §5 states this rather than letting the screenshot imply more
+than it shows. Also outstanding: the ML model is **not** yet registered as an
+`mlModel` entity, and `get_dataset_queries` is **not** yet verified against this
+substrate — both are §3 requirements carried into D3.
+
+Three more integration findings logged (10–12): ingestion sources need `pip
+install 'acryl-datahub[postgres]'` extras; `stateful_ingestion` silently requires
+a **root-level** `pipeline_name`; and the CLI redacts env-var values out of its
+own URNs, which makes logs misleading.
+
+---
+
 ## D1 COMPLETE — THE DATAHUB WRITE PATH IS PROVEN
 
 Evidence: **`evidence/d1/`** (every raw response) and **`evidence/d1/README.md`**.

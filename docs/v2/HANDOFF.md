@@ -6,58 +6,64 @@ Assume the next session has zero memory of this one.
 
 ## Current day
 
-**D1 — the write-path gate is MET.** D0.3 (stand up DataHub, dump the tool list)
-was finished first, since D1 depends on it.
+**D2 — the §3 substrate gate is MET.** Real Postgres, real dbt, real ingestion,
+and column-level lineage **provably derived, not hand-authored**.
 
-Calendar: §14 dates D0 to Jul 28 and **MWP LOCK to Aug 3**. Today is **Jul 31**.
-D0+D1 are done; **D2–D3 (substrate ingestion) are not**.
+Calendar: §14 dates **MWP LOCK to Aug 3**. Today is **Jul 31**. D0, D1, D2 done;
+**D3 (the hero-loop break) is next and is the MWP-critical one.**
 
 ## What is green
 
-* **DataHub Core v1.6.0 running and healthy** — GMS + frontend healthy, version
-  read back from the instance (`059a36c0b035…`), not from docs.
-  `versions.env` `DATAHUB_VERSION` is now filled from that reading.
-* **MCP connected; tool list dumped and committed** — `evidence/d0/mcp-tool-list.json`,
-  18 tools, plus full input schemas in `mcp-tool-schemas.json`.
-* **EVERY §8 WRITE PATH PROVEN with captured raw responses** (`evidence/d1/`):
-  * `raiseIncident` → real incident URN
-  * `updateIncidentStatus(RESOLVED)` → read back ACTIVE=0, RESOLVED=1
-  * `add_tags` on a **column** → success
-  * `update_description` on a **column** → success
-  * `save_document` → real document URN
-  * `devguard.*` structured property **definitions registered**, values set
-* 306 backend tests still pass; nothing in T0–T2 was touched.
+* **Substrate live** — PostgreSQL 16 on :5433, `raw.users` **2,000** rows,
+  `raw.orders` **20,000** rows.
+* **dbt runs clean** — `PASS=3 WARN=0 ERROR=0`; `user_order_features` built with
+  **1,715** rows. `manifest.json` + `catalog.json` generated.
+* **Postgres ingested** — 63 events, **0 failures, 0 warnings**.
+* **dbt lineage ingested** — 20 events, 0 failures, 1 cosmetic warning.
+* **Column-level lineage PROVEN auto-generated** — `amount_cents` fans out to
+  BOTH `lifetime_value_cents` and `avg_order_cents`; `status` becomes
+  `refund_count`. No naming heuristic produces that; DataHub reports
+  `confidenceScore 0.9` (its SQL parser), and `grep` finds no lineage-authoring
+  API anywhere in the repo.
+* **Full chain resolves**: `raw.users`→`stg_users`(5 col edges),
+  `raw.orders`→`stg_orders`(5), both →`user_order_features`(7).
+* **ML terminus trained** — LogisticRegression, test accuracy **0.7995** on 1,715
+  rows.
+* `docs/v2/SUBSTRATE.md` written, and its required sentence is now TRUE.
+* 306 backend tests still pass; T0–T2, D0, D1 untouched.
 
 ## What is red
 
-* **Substrate NOT ingested.** `substrate/` (Postgres compose + seed SQL + dbt
-  project + ML training script) and `recipes/*.yml` are **written but never run**.
-  §3's hard gate — *"lineage in DataHub is ingested from the substrate,
-  provably"* — is **NOT met**, and `docs/v2/SUBSTRATE.md` is deliberately not
-  written yet because its required sentence would be false.
-* **No least-privilege service account.** D1 used
-  `urn:li:corpuser:__datahub_system` (manageIngestion + managePolicies) — the
-  opposite of §11.4. Scoped account + Access Policies still to configure.
+* **DataHub UI lineage GRAPH did not render upstream nodes** in the captured
+  screenshot — graph index lag. Lineage is proven via the API, and SUBSTRATE.md
+  §5 says so explicitly rather than implying the screenshot shows it.
+  **Re-capture in D3.**
+* **ML model NOT registered as an `mlModel` entity.** §3 requires it with lineage
+  to its feature source. Trained and real; catalog registration outstanding.
+* **`get_dataset_queries` NOT verified** against this substrate. §3 requires
+  either genuine query history or deleting the "real SQL touching the dead
+  column" claim from §2 and the video.
+* **No least-privilege service account** (§11.4). Still using
+  `urn:li:corpuser:__datahub_system`.
 * **`api.groq.com` still unreachable** — blocks every LLM-backed agent in §6.
-* **Disk: ~6 GB free.** DataHub is using ~11 GB of images. The substrate Postgres
-  and dbt still have to fit. SigNoz is stopped (volumes preserved) to make room.
+* **Disk: ~4.3 GB free.** SigNoz stays stopped (volumes preserved).
 
-## The exact next command
+## The exact next command (D3)
 
 ```bash
-docker compose -f substrate/docker-compose.yml up -d      # real Postgres, port 5433
-cd substrate/dbt && dbt run                                # produces target/manifest.json
-datahub ingest -c recipes/postgres.yml
-datahub ingest -c recipes/dbt.yml                          # THIS is what makes lineage real
+# 1. register the ML model as an mlModel with lineage to the feature table
+# 2. verify get_dataset_queries returns anything for this substrate
+# 3. THE HERO-LOOP BREAK (§4 step 1) — make it really fail:
+docker exec devguard-substrate-postgres-1 psql -U devguard -d devguard \
+  -c "ALTER TABLE raw.users RENAME COLUMN user_id TO customer_id;"
+cd substrate/dbt && dbt run     # expect FAILURE — that is the runtime evidence
+python substrate/ml/train_churn_model.py   # expect FAILURE — blast radius terminus
 ```
-
-Then, and only then, write `docs/v2/SUBSTRATE.md` asserting *"All hero-path
-lineage was ingested from the running stack. No lineage was hand-authored."*
 
 ## Open questions for the human
 
-1. **Disk.** DataHub + substrate + SigNoz do not fit together. Confirm SigNoz
-   stays down during DataHub work.
-2. **`api.groq.com`** — still blocked. Every §6 LLM agent is buildable but not
-   demonstrable until it is allowlisted.
-3. **Scope, given the slip.** Three days to MWP lock with D2–D3 outstanding.
+1. **Disk (~4.3 GB).** D3 adds no images, but proof-pack capture grows. Confirm
+   SigNoz stays down.
+2. **`api.groq.com`** — still blocked; §6 agents buildable, not demonstrable.
+3. **Scope.** MWP lock is Aug 3 and D4–D6 (the agents, the write-back loop) are
+   all still ahead.

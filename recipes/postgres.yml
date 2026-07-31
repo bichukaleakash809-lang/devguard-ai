@@ -5,6 +5,10 @@
 #
 # This produces REAL dataset entities with REAL schemas, profiled from the
 # running database. Nothing here is hand-authored metadata.
+# Required whenever stateful_ingestion is enabled: the state is keyed by this
+# name, so it must be stable across runs.
+pipeline_name: "devguard_substrate_postgres"
+
 source:
   type: postgres
   config:

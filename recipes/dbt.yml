@@ -13,6 +13,10 @@
 #
 #   cd substrate/dbt && dbt run
 #   datahub ingest -c recipes/dbt.yml
+# Required whenever stateful_ingestion is enabled: the state is keyed by this
+# name, so it must be stable across runs.
+pipeline_name: "devguard_substrate_dbt"
+
 source:
   type: dbt
   config:

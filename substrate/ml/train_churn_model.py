@@ -31,7 +31,11 @@ ARTIFACT_DIR = pathlib.Path("substrate/ml/artifacts")
 # presence is what the hero loop breaks — the model does not train on it, but it
 # is required to join and to identify rows.
 ID_COLUMN = "user_id"
-FEATURE_COLUMNS = ["order_count", "lifetime_value_cents", "avg_order_cents", "refund_count"]
+# refund_count is DELIBERATELY NOT a feature. The label is derived from it, so
+# including it leaks the answer: the first version of this script listed it and
+# scored test accuracy 1.0000, which is not a good model — it is a model reading
+# the label off its own input. LAW 3 applies to our own numbers too.
+FEATURE_COLUMNS = ["order_count", "lifetime_value_cents", "avg_order_cents"]
 LABEL_EXPR = "refund_count > 0"
 
 
