@@ -123,12 +123,13 @@ Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI 
   names verbatim (`devguard.scan.latency`) and the file used underscores
   (`devguard_scan_latency`). One panel is confirmed plotting live data; the rest
   are correctly wired but need a scan that completes, which needs an API key.
-- **Alerts** — `signoz/alerts.md` describes three rules, each now written against
-  a metric that genuinely exists. **No alert rule is pre-created** in the SigNoz
-  instance (`GET /api/v1/rules` → `[]`), and that file records why, including the
-  payload shapes the API rejected. Two of the three original rules had to change
-  meaning: there is no SLO-compliance metric and no breaker *state* gauge, only a
-  transition counter.
+- **Alerts** — three rules **ship as appliable JSON** in `signoz/alerts/` and were
+  applied to a running SigNoz and verified present (`state=inactive`, i.e. loaded
+  and evaluating). `./scripts/apply_signoz_assets.sh` installs the dashboard and
+  all three, then verifies. Each targets a metric that genuinely exists — two of
+  the three original rules had to change *meaning*, not just names: there is no
+  SLO-compliance metric and no breaker *state* gauge, only a transition counter.
+  They evaluate but cannot page anyone until a notification channel is added.
 - **MCP** — `backend/core/mcp_client.py` provides a fail-safe client interface for the SigNoz MCP server. **It has not been verified against a real MCP server**: the transport and response shapes are unconfirmed (the file carries its own TODO). When the call path is unavailable the cost query falls back to an in-process estimate, which is reported as `data_source: "local_shadow"` — never as live telemetry.
 
 ## Reproducibility

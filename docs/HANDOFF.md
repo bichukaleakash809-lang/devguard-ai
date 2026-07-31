@@ -1342,8 +1342,8 @@ Continuing past this point would mean inventing work. Do not.
 | § | Item | Status |
 |---|---|---|
 | 6.1 | Stand up SigNoz at a pinned version | **DONE** — see "T2 §6.1 / §6.3 — SIGNOZ IS UP" below |
-| 6.3 | One trace visible in the SigNoz UI + screenshot | **DONE except the two agents that need a live LLM key** (same section) |
-| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **PARTIAL** — dashboard DONE (imported, renders, live data); alerts corrected but none pre-created |
+| 6.3 | One trace visible in the SigNoz UI + screenshot | **BLOCKED on the last step** — trace verified in the UI, but `fixer_agent`/`validator_agent` need a live LLM and **`api.groq.com` is denied by the egress gateway** |
+| 6.6 | `signoz/dashboard.json` imported and verified; `alerts.md` reflecting real alerts | **DONE** — dashboard imported and rendering; 3 alert rules ship as JSON and were applied + verified |
 
 > The section below this table is the ORIGINAL blocked-state record from when the
 > registry was thought to be the wall. It is kept because its diagnosis is still
@@ -1626,13 +1626,34 @@ and `01-signoz-home-services.png` shows *"Traces ingestion is active"* with
 `devguard-backend` in the Services table. The screenshot's trace ID is the SAME
 trace the automated verification asserted on — not a hand-picked different one.
 
-**What is NOT proven, stated plainly:** §6.3's definition of done names
-`devguard_pipeline → scanner_agent → fixer_agent → validator_agent`.
-**`fixer_agent` and `validator_agent` are not in this trace.** Without a live
-`GROQ_API_KEY` the Scanner's LLM call fails, the pipeline never reaches the
-Fixer, and `/scan` returns 503. The trace is real and complete *for the code that
-actually ran*; what is missing is execution, not instrumentation. One scan with a
-key against this same stack finishes §6.3 — no code or deployment change needed.
+**§6.3 IS BLOCKED ON THE LAST STEP — and it is NOT the key.** A live
+`GROQ_API_KEY` was supplied so the full chain could be run. It could not be:
+**this environment's egress gateway denies `api.groq.com`.**
+
+```
+> CONNECT api.groq.com:443 HTTP/1.1
+< HTTP/1.1 403 Forbidden
+curl: (56) CONNECT tunnel failed, response 403
+```
+
+The refusal is at CONNECT — before TLS, before any request, so the Authorization
+header is never transmitted and Groq never receives a byte. **The key's validity
+is untested and untestable from here; no claim is made either way.** The Groq
+SDK's base host was checked (`https://api.groq.com`) to rule out a
+misconfiguration on our side, so there is no alternative endpoint to point at,
+and routing around an egress denial is explicitly forbidden.
+
+So §6.3's definition of done names `devguard_pipeline → scanner_agent →
+fixer_agent → validator_agent`, and **`fixer_agent`/`validator_agent` are still
+absent**. The Scanner's LLM call fails, the pipeline never reaches the Fixer, and
+`/scan` returns 503. The trace is real and complete *for the code that actually
+ran* — what is missing is execution, not instrumentation.
+
+**Exact action required: allowlist one hostname — `api.groq.com`** (hostname, not
+IP; it resolves to rotating anycast edges). Nothing else changes; re-running
+`./scripts/verify_signoz.sh` with the key exported then produces the full chain
+and populates the six empty dashboard panels. Evidence:
+`docs/audit-evidence/t2/signoz-live-llm-blocked.txt`.
 
 ### Reproducible from a completely clean stack
 
@@ -1708,29 +1729,58 @@ confirmation. It was not: the same harness returned 0 for `signoz_calls_total`,
 which certainly has data, so the query shape was simply wrong. Discarded. The
 ClickHouse count above is the evidence.
 
-### Alerts — corrected, but honestly still not shipped
+### Alerts — THREE RULES NOW SHIP AND ARE VERIFIED
 
-`GET /api/v1/rules` → `[]`. **No alert rule exists.**
+**Superseding the previous entry**, which said the alerts half could not be
+created. It could — the schema was recoverable, and the rules now apply cleanly.
 
-`alerts.md` specified three metrics — `devguard_slo_compliance_pct`,
-`devguard_circuit_breaker_state`, `devguard_llm_cost_usd_total` — **none of which
-exist anywhere in the codebase**, admitted only in a soft aside. Anyone following
-it would have built three alerts that never fire. Rewritten against real metrics,
-and **two had to change meaning, not just names**:
+Three rules live in **`signoz/alerts/`** as appliable JSON, installed by
+**`./scripts/apply_signoz_assets.sh`** (dashboard + rules + verification, exits
+non-zero on failure). Verified by deleting every asset from the instance and
+re-applying from the committed files alone:
 
-| was | now | why |
-|---|---|---|
-| SLO Compliance Degradation | **LLM error burst** | there is no SLO metric at all |
-| Circuit Breaker Stuck Open | **Circuit breaker flapping** | only a transition *counter* is emitted, not a state *gauge* — a counter cannot express "is currently open" |
-| Cost Budget Exceeded | unchanged | just the correct name, `devguard.llm.cost_total` |
+```
+dashboard imported (HTTP 201)
+alert rule applied: circuit-breaker-flapping.json (HTTP 201)
+alert rule applied: llm-cost-budget.json (HTTP 201)
+alert rule applied: llm-error-burst.json (HTTP 201)
+count: 3
+   devguard-circuit-breaker-flapping      state=inactive  severity=critical
+   devguard-llm-cost-budget               state=inactive  severity=warning
+   devguard-llm-error-burst               state=inactive  severity=warning
+PASSED   (EXIT 0)
+```
 
-**Why they are not pre-created** — recorded as a failure, not omitted. Four
-approaches, all rejected: builder `compositeQuery` (400 *"alert rule is not
-valid"*), same with `version` v3/v4/v5 (400 *"definition is not valid"*),
-`promql_rule` (400), and UI automation — the metric picker is not a plain
-`<input>`, so **Save Alert Rule** never enabled. The API error names no field, so
-more attempts would be guesswork. Shipping a rule JSON no running SigNoz has ever
-accepted is exactly the unverified-asset problem this track exists to remove.
+Each targets a metric that genuinely exists, and **two had to change meaning**:
+there is no SLO metric at all, and the breaker emits a transition *counter* not a
+state *gauge*, so "stuck open" is not expressible — "flapping" is.
+
+**How the schema was recovered**, since the API is hostile about it:
+
+* `POST /api/v1/rules` rejects everything with one opaque line, no field named.
+  Builder-style, `version` v3/v4/v5, and `promql_rule` were all refused
+  identically — unsolvable by iteration.
+* `POST /api/v2/rules` **returns field-level errors**, which is what cracked it:
+  *"condition.compositeQuery.queries: must have at least one query"*,
+  *"notificationSettings: field is required for schemaVersion \"v2alpha1\""*.
+* **SigNoz ships its own source maps** in the container
+  (`/etc/signoz/web/assets/*.js.map`). `types/api/alerts/alertTypesV2.ts` defines
+  `PostableAlertRuleV2` exactly, and `CreateAlertV2/Footer/utils.tsx`'s
+  `validateCreateAlertState()` explains the earlier UI dead end: **every threshold
+  needs at least one channel unless routing policies are on**, so on a clean
+  install with no notification channel the Save button can never enable.
+
+Two traps worth carrying forward:
+
+* `condition.compositeQuery` takes a **`queries` envelope array**
+  (`[{"type":"builder_query","spec":{…}}]`), **not** the dashboard's
+  `builder.queryData` shape. Not interchangeable.
+* `notificationSettings` is **required**; `usePolicy: true` is what lets these
+  apply with **no channel configured**.
+
+**Operational caveat:** the rules evaluate but **cannot page anyone** until a
+notification channel exists (Alerts → Notification Channels). Deployment step,
+not an asset defect.
 
 ### Useful API facts for whoever picks this up
 

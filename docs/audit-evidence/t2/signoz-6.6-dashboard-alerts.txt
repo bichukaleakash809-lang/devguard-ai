@@ -7,16 +7,18 @@ SigNoz v0.135.0 (confirmed by /api/v1/version)
 §6.6 reads: "Ship the SigNoz assets: signoz/dashboard.json importable and
 verified; signoz/alerts.md reflecting alerts that actually exist."
 
-RESULT
-  dashboard.json  DONE   — imports into a real SigNoz, renders, and every panel
-                           now references a metric the code actually emits. One
-                           panel confirmed plotting live data.
-  alerts.md       PARTIAL — the file now reflects reality (it previously
-                           specified three metrics that do not exist), but NO
-                           alert rule is created in the instance. Programmatic
-                           creation failed; see §5. Not claimed as done.
+RESULT — §6.6 IS COMPLETE.
+  dashboard.json  DONE — imports into a real SigNoz, renders, and every panel
+                         references a metric the code actually emits. One panel
+                         confirmed plotting live data.
+  alerts          DONE — three rules SHIP AS APPLIABLE JSON in signoz/alerts/ and
+                         were applied to a running SigNoz and verified present
+                         (see §5). alerts.md documents them and the schema.
 
-Therefore §6.6 is NOT fully complete, and T2 is not complete.
+NOTE: an earlier revision of this file said the alerts half was PARTIAL because
+programmatic creation had failed. That was true at the time and is now superseded
+— the schema was recovered from SigNoz's shipped source maps and the rules apply
+cleanly. §5 records how, including the dead ends.
 
 --------------------------------------------------------------------------------
 1. FIRST, A NO-REGRESSION CHECK ON §6.1 / §6.3
@@ -163,10 +165,10 @@ a scan that completes, and without a `GROQ_API_KEY` every scan fails at the
 Scanner. Their names are now correct, which is what §6.6 can verify without a key.
 
 --------------------------------------------------------------------------------
-5. §6.6 ALERTS — HONEST STATE, NOT A CLAIM
+5. §6.6 ALERTS — THREE RULES SHIPPED, APPLIED AND VERIFIED
 --------------------------------------------------------------------------------
 
-NO ALERT RULE EXISTS. Verified against the live instance:
+STARTING STATE: no alert rule existed.
 
     $ GET /api/v1/rules
     {"status":"success","data":[]}
@@ -180,55 +182,100 @@ on three metrics:
                                     devguard.llm.cost_total)
 
 The file admitted this only in a soft aside ("assumes one corresponding OTel
-metric is emitted … not shown here"). Anyone following it would have built three
-alerts that never fire. Rewritten so every rule targets a metric that genuinely
-exists, and two of the three had to CHANGE MEANING rather than be renamed:
+metric is emitted ... not shown here"). Anyone following it would have built
+three alerts that never fire. Rewritten so every rule targets a metric that
+genuinely exists, and TWO OF THE THREE HAD TO CHANGE MEANING, not just names:
 
   * "SLO Compliance Degradation" -> "LLM error burst". There is no SLO metric.
     Nothing exports the calculation behind /slo-status.
   * "Circuit Breaker Stuck Open" -> "Circuit breaker flapping". The old rule
     needed a breaker-state GAUGE (0/1/2) to assert "held OPEN for 60s". Only a
     transition COUNTER is emitted, and a counter cannot express "is currently
-    open" — only "changed state N times". Writing the original rule would have
+    open" -- only "changed state N times". Writing the original rule would have
     meant claiming a detection that is not possible with the data.
   * "Cost Budget Exceeded" survives, with the correct counter name.
 
-WHY THE RULES ARE NOT PRE-CREATED — recorded as a failure, not omitted. Four
-approaches were tried and all failed:
+HOW THE SCHEMA WAS RECOVERED. This is the part that took the work, and the dead
+ends are recorded because they are what makes the answer trustworthy.
 
-    POST /api/v1/rules, builder compositeQuery         400 "alert rule is not valid"
-    POST /api/v1/rules, + "version": v3/v4/v5          400 "alert rule definition
-                                                            is not valid" (v3/v4)
-    POST /api/v1/rules, ruleType promql_rule           400 "alert rule is not valid"
-    UI automation of the alert builder                 the metric picker is not a
-                                                       plain <input>; the metric
-                                                       could never be selected and
-                                                       "Save Alert Rule" stayed
-                                                       disabled
+  DEAD END 1 -- POST /api/v1/rules. Accepts the request and rejects it with one
+  opaque line, no field named:
+      {"errorType":"bad_data","error":"alert rule is not valid"}
+  Tried: builder-style compositeQuery; the same with "version" v3/v4/v5; a
+  promql_rule variant. All refused identically. Unsolvable by iteration.
 
-The API error names no field, so further attempts would have been guesswork.
-Shipping a rule JSON that has never been accepted by a running SigNoz would be
-exactly the kind of unverified asset this track exists to remove, so alerts.md
-documents the UI path instead and states plainly that nothing is pre-created.
+  DEAD END 2 -- driving the UI. The metric picker is #rc_select_2 inside
+  .metric-name-selector (not a plain <input>, which is why an earlier attempt
+  could not find it). Once found, the metric SELECTED correctly -- but
+  "Save Alert Rule" stayed disabled, and so did "Test Notification", from the
+  moment the form loaded.
 
+  THE BREAKTHROUGH -- SigNoz ships its own SOURCE MAPS in the container
+  (/etc/signoz/web/assets/*.js.map). Two files answered everything:
+
+    src/types/api/alerts/alertTypesV2.ts
+        defines PostableAlertRuleV2 exactly: schemaVersion "v2alpha1",
+        condition.thresholds.spec[] as BasicThreshold
+        {name,target,matchType,op,channels[],targetUnit},
+        evaluation.kind / evaluation.spec.
+
+    src/container/CreateAlertV2/Footer/utils.tsx
+        validateCreateAlertState() -- the exact reason Save was disabled:
+        every threshold needs a label AND at least one channel, UNLESS
+        notificationSettings.routingPolicies is enabled. On a clean install with
+        no notification channel configured, the button can never enable.
+
+  AND -- POST /api/v2/rules RETURNS FIELD-LEVEL ERRORS, which v1 does not:
+      "condition.compositeQuery.queries: must have at least one query"
+      "notificationSettings: field is required for schemaVersion \"v2alpha1\""
+
+TWO THINGS THAT ARE EASY TO GET WRONG, and both bit here:
+
+  * condition.compositeQuery takes a **queries ENVELOPE array**
+    ([{"type":"builder_query","spec":{...}}]), NOT the dashboard's
+    builder.queryData shape. They are not interchangeable.
+  * notificationSettings is REQUIRED. Setting usePolicy:true routes through
+    SigNoz's routing policies instead of naming a channel -- which is what lets
+    these rules apply on a fresh instance with NO channel configured.
+
+RESULT -- applied from the committed files and verified:
+
+    $ ./scripts/apply_signoz_assets.sh
+    authenticated (token length 291, not printed)
+    dashboard imported (HTTP 201)
+    alert rule applied: circuit-breaker-flapping.json (HTTP 201)
+    alert rule applied: llm-cost-budget.json (HTTP 201)
+    alert rule applied: llm-error-burst.json (HTTP 201)
+    count: 3
+       devguard-circuit-breaker-flapping      state=inactive  severity=critical
+       devguard-llm-cost-budget               state=inactive  severity=warning
+       devguard-llm-error-burst               state=inactive  severity=warning
+    PASSED
+    EXIT 0
+
+That run was done AFTER deleting the dashboard and all three rules from the
+instance, so it proves the committed files stand alone rather than describing
+something already present. state=inactive means loaded and evaluating but not
+firing, which is correct for a system not currently in an error burst.
+
+Screenshot: signoz/05-alert-rules.png -- the SigNoz Alert Rules page listing all
+three with status OK, severities critical/warning/warning, and label
+team:devguard.
+
+CAVEAT, stated because it matters operationally: the rules apply with
+channels:[] and usePolicy:true, so they EVALUATE but cannot page anyone until a
+notification channel exists (Alerts -> Notification Channels). That is a
+deployment step for whoever runs this, not a defect in the assets.
 --------------------------------------------------------------------------------
 6. REPRODUCTION
 --------------------------------------------------------------------------------
 
-    ./scripts/verify_signoz.sh                       # stack up, traffic, spans
-    ORG=$(docker exec signoz-signoz-metastore-postgres-0-1 \
-          psql -U signoz -d signoz -tAc "SELECT id FROM organizations LIMIT 1")
-    JWT=$(curl -s -X POST http://localhost:3301/api/v2/sessions/email_password \
-          -H 'Content-Type: application/json' \
-          -d "{\"email\":\"devguard@example.com\",\"password\":\"DevGuard!2026\",\"orgId\":\"$ORG\"}" \
-          | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["accessJwt"])')
+    ./scripts/verify_signoz.sh          # stack up, traffic, spans stored
+    ./scripts/apply_signoz_assets.sh    # dashboard + 3 alert rules, then verifies
 
-    curl -X POST http://localhost:3301/api/v2/dashboards \
-      -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
-      --data-binary @signoz/dashboard.json          # expect HTTP 201
-
-    curl -H "Authorization: Bearer $JWT" http://localhost:3301/api/v1/rules
-                                                    # expect {"data":[]}
+The second script does auth, import and verification in one pass and exits
+non-zero on any failure. It reads SIGNOZ_EMAIL / SIGNOZ_PASSWORD from the
+environment only, and never prints the token.
 
 Note the login endpoint: `/api/v1/login` returns the SPA HTML in v0.135.0. The
 real one is **POST /api/v2/sessions/email_password**, and it REQUIRES an `orgId`
@@ -238,11 +285,12 @@ in the body ("orgID is required" without it).
 7. WHAT §6.6 STILL NEEDS
 --------------------------------------------------------------------------------
 
-  * A captured, working alert-rule payload (browser network tab while saving a
-    rule in the UI) so the three rules can ship pre-created.
-  * A GROQ_API_KEY, for the six metric panels whose names are now correct but
-    which have no samples until a scan completes.
-
-Neither is a code or deployment defect.
+  * NOTHING for the assets themselves — both halves are shipped and verified.
+  * A notification channel, before the rules can page anyone (they evaluate
+    without one). That is a deployment step, not an asset defect.
+  * Egress to api.groq.com, for the six metric panels whose names are now
+    correct but which have no samples until a scan completes. This environment's
+    gateway denies that host (403 to CONNECT), so no live scan can run here —
+    see signoz-live-llm-blocked.txt.
 
 ================================================================================

@@ -1,22 +1,37 @@
 # SigNoz Alert Rules — DevGuard AI
 
-**Status: these rules are NOT pre-created in any SigNoz instance.** Verified, not
-assumed — against the live instance this repo stands up:
+**Status: these three rules SHIP AS APPLIABLE JSON and are verified against a
+running SigNoz (v0.135.0).** They live in `signoz/alerts/` and go in with:
+
+```bash
+./scripts/apply_signoz_assets.sh      # dashboard + all three rules, then verifies
+```
+
+Verified end to end — the assets were deleted from the instance and re-applied
+from the committed files:
 
 ```
-$ curl -H "Authorization: Bearer $JWT" http://localhost:3301/api/v1/rules
-{"status":"success","data":[]}
+dashboard imported (HTTP 201)
+alert rule applied: circuit-breaker-flapping.json (HTTP 201)
+alert rule applied: llm-cost-budget.json (HTTP 201)
+alert rule applied: llm-error-burst.json (HTTP 201)
+count: 3
+   devguard-circuit-breaker-flapping      state=inactive  severity=critical
+   devguard-llm-cost-budget               state=inactive  severity=warning
+   devguard-llm-error-burst               state=inactive  severity=warning
+PASSED
 ```
 
-What this file gives you is three rules that can be built in the SigNoz UI in a
-couple of minutes each, **every one of them written against a metric
-`backend/core/telemetry.py` actually emits.** That was not true before: the
-previous version of this file specified three metrics
+(`state=inactive` means the rule is loaded and evaluating but not currently
+firing — which is correct for a system that is not in an error burst.)
+
+**Every rule targets a metric `backend/core/telemetry.py` actually emits.** That
+was not true before: the previous version of this file specified three metrics
 (`devguard_slo_compliance_pct`, `devguard_circuit_breaker_state`,
 `devguard_llm_cost_usd_total`) that **do not exist anywhere in the codebase**, and
-it said so only in a soft aside ("assumes one corresponding OTel metric is
-emitted … a few lines added to `telemetry.py`, not shown here"). Anyone pasting
-those rules in would have got three alerts that never fire.
+said so only in a soft aside ("assumes one corresponding OTel metric is emitted …
+a few lines added to `telemetry.py`, not shown here"). Anyone pasting those in
+would have got three alerts that never fire.
 
 ## The metrics that actually exist
 
@@ -109,25 +124,48 @@ so this alert inherits that accuracy.
 
 ---
 
+## The rule schema, and how it was worked out
+
+Worth recording, because the API is unforgiving and the docs for it are not in
+the repo.
+
+**Use `POST /api/v2/rules`, not v1.** The v1 endpoint accepts the request and
+then rejects it with a single opaque line — `{"errorType":"bad_data","error":
+"alert rule is not valid"}` — with no indication of which field is wrong. Every
+builder-style payload, with and without a `version` field, and a `promql_rule`
+variant, were all refused that way. **v2 returns field-level errors**, which is
+what made this solvable:
+
+```
+"errors": [
+  {"message": "condition.compositeQuery.queries: must have at least one query"},
+  {"message": "notificationSettings: field is required for schemaVersion \"v2alpha1\""}
+]
+```
+
+The shape itself came from SigNoz's own frontend: the container ships
+**source maps** (`/etc/signoz/web/assets/*.js.map`), and
+`src/types/api/alerts/alertTypesV2.ts` defines `PostableAlertRuleV2` exactly —
+`schemaVersion: "v2alpha1"`, `condition.thresholds.spec[]` as `BasicThreshold`,
+and `evaluation.kind` / `evaluation.spec`.
+
+Two things that are easy to get wrong:
+
+* `condition.compositeQuery` takes a **`queries` envelope array**
+  (`[{"type":"builder_query","spec":{…}}]`), *not* the dashboard's
+  `builder.queryData` shape. The two are not interchangeable.
+* `notificationSettings` is **required**. These rules set `usePolicy: true`, which
+  routes through SigNoz's routing policies instead of naming a channel. That is
+  what lets them apply on a fresh instance with **no notification channel
+  configured** — otherwise the UI's own validator (`validateCreateAlertState` in
+  `CreateAlertV2/Footer/utils.tsx`) demands at least one channel per threshold,
+  which is exactly why **Save Alert Rule stays disabled** on a clean install until
+  you add a channel.
+
 ## Notifications
 
-SigNoz needs a channel before any rule can notify: **Settings → Alert Channels**
-→ add a Slack Incoming Webhook (or email/PagerDuty/webhook), then reference it
-from each rule's notification step. With no channel configured a rule still
-evaluates and shows as firing in the UI — it just cannot page anyone.
-
-## Why these are not shipped pre-created
-
-Creating them programmatically was attempted and **failed**, and the failure is
-recorded rather than hidden: `POST /api/v1/rules` on SigNoz v0.135.0 rejected
-every payload shape tried — builder-style `compositeQuery` (with and without a
-`version` field) and `promql_rule` — each with
-`{"errorType":"bad_data","error":"alert rule is not valid"}`, and the error does
-not say which field is wrong. Driving the UI's query builder headlessly did not
-work either: its metric picker is not a plain `<input>`, so the metric could
-never be selected and **Save Alert Rule** stayed disabled.
-
-Rather than ship a rule JSON that has never been accepted by a running SigNoz,
-this file documents the UI path, which is verified to work and takes about two
-minutes per rule. If someone captures a working payload from the browser's
-network tab, it belongs in this repo and this section should be replaced with it.
+The rules apply with no channel, but they cannot page anyone until one exists.
+Add it under **Alerts → Notification Channels** (Slack webhook, email, PagerDuty,
+webhook), then either attach it to each threshold's `channels: []` or leave
+`usePolicy: true` and define a routing policy. Until then a rule still evaluates
+and shows its state in the UI — it just notifies nobody.

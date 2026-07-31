@@ -1,0 +1,121 @@
+================================================================================
+LIVE LLM RUN — BLOCKED BY EGRESS, NOT BY THE KEY
+================================================================================
+Captured: 2026-07-31
+
+A runtime GROQ_API_KEY was supplied specifically so a full
+Scanner -> Fixer -> Validator execution could be run and §6.3 finished.
+
+THAT COULD NOT BE DONE, and the reason is NOT the key: **this environment's
+egress gateway denies api.groq.com.**
+
+NO CREDENTIAL VALUE APPEARS IN THIS FILE, in any committed file, or in any
+command output below. The key was held only in an environment variable for the
+duration of the run, in a 0600 file outside the repository.
+
+--------------------------------------------------------------------------------
+1. THE MEASUREMENT
+--------------------------------------------------------------------------------
+
+    $ curl -s -o /dev/null -w '%{http_code}' https://api.groq.com/openai/v1/models \
+        -H "Authorization: Bearer $GROQ_API_KEY"
+    000                      <- 000 = no connection established at all
+
+Verbose, showing exactly where it dies:
+
+    * Establish HTTP proxy tunnel to api.groq.com:443
+    > CONNECT api.groq.com:443 HTTP/1.1
+    < HTTP/1.1 403 Forbidden
+    * CONNECT tunnel failed, response 403
+    curl: (56) CONNECT tunnel failed, response 403
+
+The proxy's own failure log names the host and the decision:
+
+    host:   api.groq.com:443
+    kind:   connect_rejected
+    detail: gateway answered 403 to CONNECT (policy denial or upstream failure)
+
+--------------------------------------------------------------------------------
+2. WHY THIS IS NOT A KEY PROBLEM
+--------------------------------------------------------------------------------
+
+The refusal happens at CONNECT — before TLS, before any HTTP request, and
+therefore before the Authorization header is ever transmitted. Groq never
+receives a byte. **The key's validity is untested and untestable from here**;
+it is neither confirmed good nor confirmed bad, and this file does not claim
+either.
+
+This is the same control that blocked the container registry earlier in T2:
+a default-deny allowlist enforced by the policy gateway that the session's local
+HTTPS proxy relays to. `api.groq.com` is simply not on the allowlist.
+
+The Groq SDK's own base URL was checked, to rule out a misconfiguration on our
+side rather than assuming:
+
+    groq SDK base hosts: ['https://api.groq.com', ...]
+
+So the blocked host is exactly the host the client must reach. There is no
+alternative endpoint to point at, and routing around an egress denial is
+explicitly forbidden by the proxy's documentation ("Do not retry or route around
+it — report the blocked host").
+
+--------------------------------------------------------------------------------
+3. WHAT THIS BLOCKS, PRECISELY
+--------------------------------------------------------------------------------
+
+  §6.3 COMPLETION. The trace captured in signoz-6.1-6.3-verified.txt is real and
+  correctly nested, but stops at `scanner_agent` because the Scanner's LLM call
+  fails. `fixer_agent` and `validator_agent` require a completed Scanner call.
+  Nothing about the instrumentation is missing — the execution is.
+
+  SIX DASHBOARD PANELS. `devguard.scan.latency`, `devguard.llm.cost_per_request`,
+  `devguard.llm.tokens_total` and the cache/breaker counters are only recorded on
+  a scan that completes. Their names are now correct (see
+  signoz-6.6-dashboard-alerts.txt) but they have no samples.
+
+  THE BENCHMARK ARTIFACT, and any measurement of whether the Scanner actually
+  finds real vulnerabilities or the Fixer writes correct patches.
+
+WHAT IT DOES NOT BLOCK, and what was therefore completed with the stack live:
+§6.6 in full — the dashboard imports and renders, and three alert rules ship as
+JSON and were applied to the running SigNoz and verified.
+
+--------------------------------------------------------------------------------
+4. THE EXACT ACTION REQUIRED
+--------------------------------------------------------------------------------
+
+Allowlist ONE hostname on the session's egress policy:
+
+    api.groq.com
+
+Hostname, not IP: it resolves to rotating anycast edges, so an IP allowlist
+would break without warning.
+
+Once allowed, no code or deployment change is needed. Re-run:
+
+    ./scripts/verify_signoz.sh      # with GROQ_API_KEY exported
+
+and the same pipeline that produced the 9-span trace will produce the full
+Scanner -> Fixer -> Validator chain, and the six empty panels will populate.
+
+--------------------------------------------------------------------------------
+5. VERIFY AFTER REMEDIATION
+--------------------------------------------------------------------------------
+
+    # 1. the host is reachable at all (anything but 000)
+    curl -s -o /dev/null -w '%{http_code}\n' https://api.groq.com/openai/v1/models \
+      -H "Authorization: Bearer $GROQ_API_KEY"        # expect 200
+
+    # 2. no gateway denial recorded for it
+    curl -sS "$HTTPS_PROXY/__agentproxy/status" \
+      | python3 -c 'import sys,json; print([e["host"] for e in json.load(sys.stdin)["recentRelayFailures"]])'
+      # expect no api.groq.com entry
+
+    # 3. a full pipeline trace
+    ./scripts/verify_signoz.sh
+    # then, in ClickHouse, the four-agent chain:
+    SELECT DISTINCT name FROM signoz_traces.distributed_signoz_index_v3
+    WHERE trace_id='<the trace_id the script prints>'
+    # expect scanner_agent AND fixer_agent AND validator_agent
+
+================================================================================
