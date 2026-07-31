@@ -35,6 +35,18 @@ The proxy's own failure log names the host and the decision:
     kind:   connect_rejected
     detail: gateway answered 403 to CONNECT (policy denial or upstream failure)
 
+RE-VERIFIED on a later run, with a freshly supplied key, and the result is
+unchanged. The denial is also BROADER than a single host — every Groq hostname
+is refused, so there is no alternate endpoint to reach for:
+
+    api.groq.com          HTTP 000    connect_rejected, gateway 403
+    groq.com              HTTP 000    connect_rejected, gateway 403
+    console.groq.com      HTTP 000    connect_rejected, gateway 403
+
+On that second run the key was never even written to disk: CONNECT is refused
+before authentication, so the key is not needed to establish that the host is
+unreachable, and it was therefore not persisted anywhere at all.
+
 --------------------------------------------------------------------------------
 2. WHY THIS IS NOT A KEY PROBLEM
 --------------------------------------------------------------------------------
@@ -87,6 +99,10 @@ JSON and were applied to the running SigNoz and verified.
 Allowlist ONE hostname on the session's egress policy:
 
     api.groq.com
+
+That is the only one needed. `groq.com` and `console.groq.com` are also denied,
+but they are the marketing site and the web console — the SDK talks only to
+`api.groq.com`, so allowing that single host is sufficient.
 
 Hostname, not IP: it resolves to rotating anycast edges, so an IP allowlist
 would break without warning.
