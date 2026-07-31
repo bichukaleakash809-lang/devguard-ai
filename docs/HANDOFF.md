@@ -1337,6 +1337,111 @@ Continuing past this point would mean inventing work. Do not.
 
 ---
 
+## CURRENT BLOCKER — READ THIS FIRST
+
+**`api.groq.com` is denied by the execution environment's egress policy.** It is
+external; nothing in this repository can fix it.
+
+    > CONNECT api.groq.com:443 HTTP/1.1
+    < HTTP/1.1 403 Forbidden
+
+Verified from a clean workspace outside the repo, with a clean `HOME`, and
+reproduced with a second HTTP client. A control request to `api.github.com` from
+the same context returned 200, and DNS resolves — so it is this host, not the
+network. The refusal is at CONNECT, **before TLS and before any HTTP request**,
+so the supplied key is never transmitted: its validity is **untested, not
+disproven**.
+
+**Owner action: allowlist the hostname `api.groq.com`.** Hostname, not IP.
+
+**What this leaves pending — and ONLY this:**
+
+* **T2 §6.3** — `fixer_agent` / `validator_agent` are absent from the verified
+  trace. Missing *execution*, not instrumentation.
+* Six dashboard panels have correct metric names but no samples.
+* The accuracy benchmark artifact has never been produced.
+
+All three are code-complete. **`docs/TODO-BLOCKED.md` holds the exact commands to
+re-run once the host is reachable** — do not mark §6.3 complete before then.
+
+---
+
+## T1b — CLOSED: LICENCE + THE DOCKER PATH
+
+Full evidence: **`docs/audit-evidence/t2/docker-build-fixes.txt`**
+
+### Apache-2.0 `LICENSE` added
+
+AUDIT A4 called this "a **binary submission requirement**" (Critical), and
+`03_CORE_CONTRACT.md` §2 puts the Apache-2.0 licence on the explicit **never
+cut** list. There was no LICENSE file at all. Now there is: the canonical
+Apache-2.0 text, 202 lines, appendix filled with
+`Copyright 2026 DevGuard AI contributors`.
+
+> If you would rather the copyright line carry your legal name or company, change
+> that one line — I used a neutral holder rather than inventing one for you.
+
+### AUDIT B1 / B2 / A1 — the Docker path — FIXED AND PROVEN
+
+| # | Defect | Proof of the fix |
+|---|---|---|
+| **B1** | `COPY requirements.txt .` with `context: ./backend`, but the file is at the repo root | Controlled A/B on the *same* probe Dockerfile: old context → `"/requirements.txt": not found` (B1 reproduced); new context → **exit 0**, all COPYs resolve |
+| **B2** | `CMD uvicorn main:app`, but main.py imports `backend.*` | Image filesystem: `/app/main.py` → *No such file*; `/app/backend/main.py` → present. CMD is now `backend.main:app` with `PYTHONPATH=/app` |
+| **A1** | compose referenced `frontend/Dockerfile`, which did not exist | Written (3-stage, node:20-alpine, non-root uid 1001). `output: 'standalone'` added to next.config.js; verified `.next/standalone/server.js` is produced and that it serves **HTTP 200** |
+
+**A defect in my own first draft, recorded rather than quietly fixed:** the
+frontend Dockerfile initially had `COPY /app/public ./public`, and this app has
+**no `public/` directory** — a hard build failure, i.e. exactly the class of
+error A1 was. Removed, with a comment saying why.
+
+**Two more compose defects fixed while there:**
+
+* `GROQ_API_KEY: ${GROQ_API_KEY:?...}` — the `:?` form **aborts `docker compose
+  up`** when unset, contradicting this project's own "boots without a key"
+  guarantee (B4) and making the documented one-command start impossible on a
+  clean clone. Now `${GROQ_API_KEY:-}`.
+* `version: "3.9"` removed (B7) — obsolete in Compose v2, warned on every run.
+
+**NOT claimed: that the image builds end to end.** Two environment constraints
+stop it here, neither a Dockerfile defect — `deb.debian.org` is egress-denied
+(`apt-get update` → 403) and container TLS to PyPI fails because the session
+proxy re-terminates it. The sandbox-specific workaround was deliberately **not**
+baked into the committed Dockerfile: it would be wrong, and a trust downgrade,
+for anyone else. Note also that `chromadb`/`sentence-transformers` still pull
+~5.4 GiB of torch/CUDA — the image will be huge until open issue 4 is decided.
+
+---
+
+## T2 §6.7 — FAIL-SAFE, NOW ACTUALLY TESTED AT THE PIPELINE LEVEL
+
+§6.7 says: *"SigNoz down must never break a scan. Prove it with a test that runs
+**the pipeline** with the collector unreachable."*
+
+`tests/test_telemetry_failsafe.py` covered the **endpoints** with a dead
+collector. It never ran `run_pipeline`, so the contract's actual wording had no
+test behind it. **`tests/test_pipeline_failsafe.py` (5 tests) closes that**, with
+the OTLP endpoint pointed at port 9 (RFC 863 discard) before telemetry is
+imported:
+
+* the collector really is unreachable (**guards the guard** — without this, every
+  other test in the file could pass for the wrong reason);
+* the pipeline converges;
+* the result is **identical** to the healthy case — fail-safe means unchanged,
+  not merely "did not crash";
+* 10 consecutive scans do not degrade;
+* no exporter `ConnectionError`/`OSError` escapes to the caller.
+
+**A bug in my own test, caught by the suite:** it first asserted
+`result.attempts`, which `PipelineResult` does not have. Pydantic raised
+`AttributeError` and it failed loudly — the real field is `reflection_history`.
+Worth noting because a `getattr(..., default)` there would have made the
+assertion silently vacuous, which is the exact anti-pattern this codebase spent
+six defects eliminating.
+
+**306 tests pass** (was 301).
+
+---
+
 ## T2 — WHAT IS STILL OPEN (blocked, with evidence)
 
 | § | Item | Status |
@@ -1877,8 +1982,11 @@ Blocking first:
 2. **No Groq API key.** No live LLM scan has ever run, in any session. The
    Scanner's end-to-end path and `verify_otel.py --require-agent-spans` are
    both unexercised because of it.
-3. **Licence.** `03_CORE_CONTRACT.md` §2 makes Apache-2.0 a hard requirement;
-   README previously said MIT; no `LICENSE` file exists. Owner's call.
+3. ~~**Licence.**~~ **RESOLVED — Apache-2.0 `LICENSE` added**, as
+   `03_CORE_CONTRACT.md` §2 requires (it is on the never-cut list, and AUDIT A4
+   called it a binary submission requirement). The only thing left is cosmetic:
+   the copyright line reads `Copyright 2026 DevGuard AI contributors` — change it
+   if you want your legal name or company there instead.
 4. **Cut `chromadb` + `sentence-transformers`?** 5.4 GiB including CUDA, for
    optional accelerators with a working fallback. Needs approval per §6. **Cut
    them only after the explicit instrumentation pins added in T1 phase 1** —

@@ -1,0 +1,195 @@
+================================================================================
+T1b — AUDIT B1 / B2 / A1 FIXED: THE DOCKER PATH
+================================================================================
+Captured: 2026-07-31
+
+AUDIT recorded three defects that together meant `docker compose up` could never
+have worked, and that the backend image had NEVER been built successfully:
+
+  B1 (Critical)  backend/Dockerfile does `COPY requirements.txt .` but compose
+                 passed `context: ./backend`, and requirements.txt lives at the
+                 repo ROOT. The build died on that COPY.
+  B2 (Critical)  `CMD uvicorn main:app` targets a module that does not exist in
+                 the image. main.py does `from backend.core import telemetry`, so
+                 it must be imported as `backend.main:app`.
+  A1             docker-compose.yml referenced `frontend/Dockerfile`, which was
+                 not in the repository at all.
+
+All three are now fixed. B1 and B2 are proven with measurements below rather than
+asserted.
+
+--------------------------------------------------------------------------------
+1. B1 — PROVEN BY CONTROLLED A/B, OLD CONTEXT vs NEW
+--------------------------------------------------------------------------------
+
+The same probe Dockerfile was built twice, changing ONLY the build context. It
+performs exactly the COPYs the real backend image needs:
+
+    FROM python:3.11-slim
+    WORKDIR /app
+    COPY requirements.txt .
+    COPY backend/ ./backend/
+    COPY groq_client.py ./
+    RUN ls -la requirements.txt groq_client.py && ls backend | head -5
+
+OLD CONTEXT — `docker build -f probe ./backend`   (what compose used to pass)
+
+    EXIT 1
+    #7 ERROR: failed to calculate checksum of ref ...: "/groq_client.py": not found
+    #8 ERROR: failed to calculate checksum of ref ...: "/requirements.txt": not found
+
+    ^ B1 reproduced exactly. The files are simply not in that context.
+
+NEW CONTEXT — `docker build -f probe .`   (the fix)
+
+    EXIT 0
+    #9  [5/6] COPY groq_client.py ./
+    #10 [6/6] RUN ls -la requirements.txt groq_client.py && ls backend | head -5
+    #10 -rw-r--r-- 1 root root 3068 groq_client.py
+    #10 -rw-r--r-- 1 root root 3529 requirements.txt
+    #10 api
+    #10 core
+
+    ^ every COPY resolves, and backend/api + backend/core are present.
+
+--------------------------------------------------------------------------------
+2. B2 — PROVEN BY INSPECTING THE IMAGE FILESYSTEM
+--------------------------------------------------------------------------------
+
+Run against the image built from the new context:
+
+    $ ls /app
+    backend
+    groq_client.py
+    requirements.txt
+
+    $ ls /app/main.py          # what the OLD `uvicorn main:app` needs
+    ls: cannot access '/app/main.py': No such file or directory
+
+    $ ls /app/backend/main.py  # what the NEW `uvicorn backend.main:app` needs
+    /app/backend/main.py
+
+There is no top-level `main` module in the image and there never could have been,
+because main.py imports its siblings as `backend.*`. The CMD is now
+`uvicorn backend.main:app`, and `PYTHONPATH=/app` is set so the package resolves.
+
+This is the same invocation form already exercised elsewhere in the repo — CI
+runs `python -c "import backend.main"` and scripts/verify_signoz.sh runs
+`uvicorn backend.main:app` — so the module path is not a guess.
+
+--------------------------------------------------------------------------------
+3. A1 — frontend/Dockerfile NOW EXISTS, AND ITS OUTPUT IS VERIFIED
+--------------------------------------------------------------------------------
+
+Written as a 3-stage build (deps -> build -> runtime) on node:20-alpine, non-root
+(uid 1001), matching the backend image's posture.
+
+It depends on Next's standalone output, so `output: 'standalone'` was added to
+frontend/next.config.js. Verified that this produces exactly what the Dockerfile
+copies:
+
+    $ npm run build
+    EXIT 0 — all 5 routes still ○ (Static) prerendered
+
+    $ ls -d .next/standalone .next/static
+    .next/standalone
+    .next/static
+    server.js: PRESENT
+
+And that the standalone server actually serves — i.e. that `CMD ["node",
+"server.js"]` is correct:
+
+    $ (cd .next/standalone && PORT=3222 node server.js)
+    ▲ Next.js 16.2.12
+    - Local: http://127.0.0.1:3222
+    $ curl -o /dev/null -w '%{http_code}' http://127.0.0.1:3222/
+    200
+
+A DEFECT IN MY OWN FIRST DRAFT, recorded because it is the same class of mistake
+as A1 itself: the Dockerfile initially had `COPY --from=builder /app/public
+./public`, and **this app has no public/ directory** —
+
+    $ ls frontend/public
+    ls: cannot access 'public': No such file or directory
+
+COPY of a missing path is a hard build failure, so that line would have made the
+frontend image unbuildable for exactly the reason A1 flagged. It was removed, and
+the Dockerfile now says why so nobody adds it back blindly.
+
+--------------------------------------------------------------------------------
+4. TWO MORE COMPOSE DEFECTS FIXED WHILE HERE
+--------------------------------------------------------------------------------
+
+(a) `GROQ_API_KEY: ${GROQ_API_KEY:?set GROQ_API_KEY in .env}`. The `:?` form
+    ABORTS `docker compose up` when the variable is unset. That directly
+    contradicts this project's own guarantee that the backend boots without a key
+    (AUDIT B4, which was fixed in the code but re-introduced at the compose
+    layer), and it made the documented one-command start impossible on a clean
+    clone. Now `${GROQ_API_KEY:-}`: unset is allowed, and scans fail at the LLM
+    call with a clear error, which is the designed keyless behaviour.
+
+(b) `version: "3.9"` removed (AUDIT B7). Compose v2 ignores it and warns
+    "the attribute `version` is obsolete" on every single invocation.
+
+Both verified: `docker compose config -q` exits 0 with no warnings.
+
+Two .dockerignore files were added. The backend one matters for correctness as
+well as size: the build context is now the repo root, so without it the context
+would include frontend/, venvs, .next/ and signoz/deploy/ — several GB.
+
+--------------------------------------------------------------------------------
+5. WHAT IS *NOT* VERIFIED, AND WHY — STATED PLAINLY
+--------------------------------------------------------------------------------
+
+**A complete image build has NOT been run to completion in this environment.**
+Two environment constraints stop it, and neither is a defect in the Dockerfiles:
+
+  1. `apt-get update` fails. The Debian repos are denied by the same egress
+     policy that blocks the container registry and Groq:
+
+         E: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease
+            403  Forbidden [IP: 151.101.2.132 80]
+
+     Confirmed from the host too: `curl https://deb.debian.org/debian/` -> 000.
+
+  2. PyPI is reachable from inside a container but its TLS is re-terminated by
+     the session proxy, which containers do not trust:
+
+         SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED]
+         self-signed certificate in certificate chain'))
+
+     The environment's own README documents the workaround (copy its CA into the
+     build context, build with --network host). That workaround is deliberately
+     NOT baked into the committed Dockerfile: it is specific to this sandbox and
+     would be wrong — and a trust downgrade — for anyone else building this image.
+
+So B1, B2 and A1 are fixed and each is individually proven, but the claim "the
+image builds end to end" is NOT made here. On a normal machine with unrestricted
+egress, `docker compose build` should complete; that remains to be confirmed by
+someone who has one.
+
+Separately worth knowing before trying: requirements.txt still pins `chromadb`
+and `sentence-transformers`, which pull `torch` and the CUDA wheels — roughly
+5.4 GiB. The backend image will be very large until HANDOFF open issue 4 is
+decided.
+
+--------------------------------------------------------------------------------
+6. REPRODUCTION
+--------------------------------------------------------------------------------
+
+    # B1, both directions
+    printf 'FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\n' > /tmp/p.Dockerfile
+    docker build -f /tmp/p.Dockerfile ./backend    # expect FAILURE  (B1)
+    docker build -f /tmp/p.Dockerfile .            # expect SUCCESS  (fixed)
+
+    # B2
+    docker run --rm <image> ls /app/main.py          # expect: No such file
+    docker run --rm <image> ls /app/backend/main.py  # expect: present
+
+    # A1 + standalone output
+    cd frontend && npm run build && ls .next/standalone/server.js
+
+    # compose
+    docker compose config -q                         # expect exit 0, no warnings
+
+================================================================================

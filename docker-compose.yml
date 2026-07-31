@@ -6,7 +6,8 @@
 # The `obs` profile is opt-in because full SigNoz is heavy; for most local
 # runs the OTLP exporter can point at SigNoz Cloud instead (see DEPLOYMENT.md).
 
-version: "3.9"
+# NOTE: no top-level `version:` key. Compose v2 ignores it and warns
+# ("the attribute `version` is obsolete") on every invocation — AUDIT B7.
 
 services:
   redis:
@@ -22,13 +23,23 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      # Context is the REPO ROOT, not ./backend — requirements.txt and
+      # groq_client.py live here, and main.py imports `backend.*` as a package.
+      # AUDIT B1/B2: the previous `context: ./backend` made this image
+      # unbuildable and unbootable. See backend/Dockerfile for the full note.
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      GROQ_API_KEY: ${GROQ_API_KEY:?set GROQ_API_KEY in .env}
+      # NOT `${GROQ_API_KEY:?...}`. The `:?` form aborts `docker compose up`
+      # outright when the variable is unset, which contradicts this project's
+      # own guarantee that the backend boots without a key (AUDIT B4) and made
+      # the documented one-command start impossible on a clean clone. Unset is
+      # allowed: scans then fail at the LLM call with a clear error, which is
+      # the designed keyless behaviour.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       REDIS_URL: redis://redis:6379/0
       # Default to local OTLP collector; override to SigNoz Cloud if preferred.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}

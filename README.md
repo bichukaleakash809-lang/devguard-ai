@@ -80,7 +80,7 @@ approximations says so.
 | Backend | FastAPI, Python 3.11, async throughout |
 | AI Engine | Groq (Llama 3.3 70B / 3.1 8B — severity + telemetry-routed), swap point marked for GPT-5.6 |
 | Vector Store | In-process CWE/OWASP RAG store |
-| Observability | OpenTelemetry (traces, metrics, logs) exporting OTLP/gRPC — verified against a local collector, **not** yet against SigNoz |
+| Observability | OpenTelemetry (traces, metrics, logs) over OTLP/gRPC — verified against a local collector **and against a real self-hosted SigNoz v0.135.0** (trace stored and visible in the UI) |
 | Resilience | Custom circuit breaker with fallback routing |
 
 ## Core Features
@@ -115,7 +115,16 @@ Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI 
 
 ## SigNoz Usage
 
-- **Traces** — the pipeline is instrumented so each scan emits one distributed trace (`devguard_pipeline → scanner_agent / fixer_agent / validator_agent`) plus self-observation spans, with logs bridged to the same trace via OpenTelemetry's `LoggingHandler`. **Not yet verified end to end against a running SigNoz instance** — see Limitations.
+- **Traces** — each scan emits one distributed trace plus self-observation spans,
+  with logs bridged to the same trace via OpenTelemetry's `LoggingHandler`.
+  **Verified against a real self-hosted SigNoz v0.135.0**: a live DevGuard trace
+  is stored and visible in the UI, screenshot in `docs/audit-evidence/t2/signoz/`
+  — `scan_request → cache_lookup + resilient_pipeline → llm_invoke ×2 (primary
+  and circuit-breaker fallback) → devguard_pipeline → scanner_agent`.
+  **`fixer_agent` and `validator_agent` are not in it yet**: the pipeline stops at
+  the Scanner because this environment's egress policy blocks `api.groq.com`, so
+  no scan can complete. That is missing execution, not missing instrumentation —
+  see `docs/TODO-BLOCKED.md` for the exact command to finish it.
 - **Dashboards** — `signoz/dashboard.json` **has been imported into a real SigNoz
   (v0.135.0) and renders**; screenshot in `docs/audit-evidence/t2/signoz/`. Every
   panel now references a metric `telemetry.py` actually emits — before this it
@@ -161,14 +170,22 @@ untested deployment plan. To point DevGuard at a SigNoz you already run, set
 
 Stated plainly, because a claim a judge can disprove costs more than the feature was worth. Full detail in `docs/AUDIT.md`.
 
-- **SigNoz has never been verified end to end.** Traces, the dashboard and the log↔trace bridge are implemented but unproven against a running instance. No screenshot of a real DevGuard trace exists yet.
+- **SigNoz is verified, with one step outstanding.** The stack, a real stored
+  trace, the dashboard and the alert rules are all proven against a running
+  SigNoz v0.135.0. What is *not* yet proven is the full four-agent chain in one
+  trace, which needs a completed scan and therefore `api.groq.com` egress.
 - **The MCP self-observation path is unverified.** `mcp_client.py` targets an assumed HTTP transport; real MCP is JSON-RPC. Its default URL is not a SigNoz address. Treat the "agents query their own telemetry via MCP" idea as designed-and-stubbed, not demonstrated.
 - **The Nexus god-mode endpoints run synthetically when called with an empty body**, which is what the UI currently sends. Panels badge every response with its real provenance (`LIVE` / `LOCAL` / `SIMULATED` / `PARTIAL`), so what you see is labelled honestly — but most of it is currently `SIMULATED`.
-- **The Docker path does not work yet** — `backend/Dockerfile` copies files from
-  outside its build context and there is no `frontend/Dockerfile`. Run the
-  backend and frontend directly (see Quickstart). Fixing this needs container
-  registry access, which is currently blocked; evidence in
-  `docs/audit-evidence/t2/registry-egress-block.txt`.
+- **The Docker path is fixed but not fully built end to end here.** Both defects
+  are corrected and proven: `backend/Dockerfile` now builds from the repo root
+  (its `COPY requirements.txt` used to fail outright — reproduced and fixed with
+  a controlled A/B) and runs `backend.main:app` rather than `main:app` (there is
+  no `/app/main.py` in the image); `frontend/Dockerfile` now exists at all. What
+  is **not** verified is a complete image build, because this environment's
+  egress policy blocks `deb.debian.org` (apt) and re-terminates TLS so containers
+  cannot verify PyPI. Neither is a defect in the Dockerfiles. Run the backend and
+  frontend directly (see Quickstart) if you hit the same. Evidence:
+  `docs/audit-evidence/t2/docker-build-fixes.txt`.
 - **The benchmark harness has never been run to an artifact**, so no accuracy
   figures are published anywhere. The result page shows "accuracy not measured"
   until one exists. To produce one you need a working `GROQ_API_KEY`:
@@ -188,8 +205,8 @@ Stated plainly, because a claim a judge can disprove costs more than the feature
   clean-code short-circuit. What is **not** covered is the models' own judgement:
   no scan has ever run against a live LLM, so nothing here measures whether the
   Scanner finds real vulnerabilities or the Fixer writes correct patches.
-- **No `LICENSE` file yet.** One must be added before this is distributed.
+- ~~No `LICENSE` file yet.~~ **Fixed** — Apache-2.0, as the contract requires.
 
 ## License
 
-See `LICENSE`. **Not yet added — see Limitations.**
+Apache-2.0 — see [`LICENSE`](LICENSE).
