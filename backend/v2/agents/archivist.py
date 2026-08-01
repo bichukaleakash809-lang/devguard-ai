@@ -54,6 +54,14 @@ class PriorKnowledge:
     negotiated_tools: frozenset[str]
     missing_from_contract: frozenset[str]
 
+    retrieval_enabled: bool = True
+    """False only when §9A's ablation switched retrieval off deliberately.
+
+    Kept separate from `documents_available` on purpose: "we chose not to look"
+    and "we could not look" are different facts, and collapsing them would make
+    the ablation's off-arm indistinguishable from a broken catalog.
+    """
+
     @property
     def has_prior_incident(self) -> bool:
         return bool(self.documents)
@@ -61,6 +69,9 @@ class PriorKnowledge:
     @property
     def summary(self) -> str:
         """§8's 'PREVIOUS VERIFIED INCIDENT' line, or an explicit miss."""
+        if not self.retrieval_enabled:
+            return ("RETRIEVAL DISABLED — §9A ablation off-arm. Not a miss: no "
+                    "lookup was attempted.")
         if not self.documents_available:
             return ("NO PRIOR KNOWLEDGE — document retrieval is unavailable on this "
                     "catalog (no documents exist, so the tools are hidden). This is "
@@ -82,11 +93,19 @@ class Archivist:
     NAME = "archivist"
 
     def __init__(self, client: DataHubMCPClient, builder: EvidenceBuilder,
-                 pack: ProofPack, sentinel: Optional[Sentinel] = None) -> None:
+                 pack: ProofPack, sentinel: Optional[Sentinel] = None,
+                 *, retrieval: bool = True) -> None:
         self._client = client
         self._builder = builder
         self._pack = pack
         self._sentinel = sentinel or Sentinel()
+        # §9A's ablation flag. When False the agent still negotiates
+        # capabilities — that is step 4 and is not what is being ablated — but
+        # performs no document retrieval at all. Reported distinctly from "the
+        # tools were unavailable", because a disabled feature and a missing
+        # capability are different facts and the Diagnostician must be able to
+        # tell them apart.
+        self._retrieval = retrieval
 
     # ------------------------------------------------------------------ step 4
 
@@ -127,7 +146,22 @@ class Archivist:
         evidence: list[Evidence] = []
         screened: list[ScreenedText] = []
 
-        if available:
+        if not self._retrieval:
+            evidence.append(self._builder.make(
+                source=EvidenceSource.RUNTIME,
+                trust=EvidenceTrust.TRUSTED_SYSTEM,
+                confidence=EvidenceConfidence.OBSERVED,
+                claim="document retrieval DISABLED for this run (§9A ablation off-arm)",
+                raw_ref=self._pack.write(
+                    "archivist/retrieval-disabled.txt",
+                    "§9A ablation: retrieval=off.\n\n"
+                    "No document lookup was attempted. This is a deliberate "
+                    "experimental condition, NOT a failed or empty search — the "
+                    "tools were offered by the server and simply not called.\n\n"
+                    f"negotiated tools ({len(caps.tools)}): {sorted(caps.tool_names)}\n",
+                    note="Ablation off-arm. No lookup attempted."),
+            ))
+        elif available:
             # Two stages, because that is how the tools are actually designed —
             # discovered the hard way in D6 (integration finding 22).
             #
@@ -209,6 +243,7 @@ class Archivist:
 
         knowledge = PriorKnowledge(
             documents_available=available,
+            retrieval_enabled=self._retrieval,
             documents=tuple(screened),
             negotiated_tools=caps.tool_names,
             missing_from_contract=caps.missing_from(
@@ -223,7 +258,8 @@ class Archivist:
         knowledge, evidence, records = self.retrieve(query)
         all_evidence = [caps_evidence_pair[1], *evidence]
 
-        decision = (AgentDecision.OK if knowledge.documents_available
+        decision = (AgentDecision.OK
+                    if (knowledge.documents_available or not self._retrieval)
                     else AgentDecision.DEGRADED)
         handoff = AgentHandoff(
             from_agent=self.NAME, to_agent=to_agent,

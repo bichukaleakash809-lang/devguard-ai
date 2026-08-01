@@ -14,12 +14,14 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D6 COMPLETE.**
-**D7 is the next phase and has NOT been started.** D7 is the ablation (§9A),
-N>=5 both arms, cost/token accounting, raw runs into `examples/`. Read
-`evidence/d6/README.md` first. The hero-loop rename is **still in place** and
-dbt is **still red on purpose** — that is the committed state, and D3/D4/D5/D6
-evidence all depend on it. `scripts/reset_demo.py` restores it after any run.
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D7 COMPLETE.**
+**D8 is the next phase and has NOT been started.** D8 is §9B (the
+fault-injection eval suite, 5–8 faults plus a control expecting
+`INSUFFICIENT_EVIDENCE`) and §11 security work including the live injection
+demo. Read `evidence/d7/README.md` first. The hero-loop rename is **still in
+place** and dbt is **still red on purpose** — that is the committed state, and
+D3–D7 evidence all depend on it. `scripts/reset_demo.py` restores it after any
+run.
 
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
@@ -1341,6 +1343,70 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D7 COMPLETE — THE ABLATION, AND WHAT IT COULD NOT MEASURE
+
+Evidence: **`evidence/d7/README.md`** · published artifact:
+**`examples/ablation/`** (timings.json + generated README + 10 raw runs) ·
+packs under `evidence/proof-pack/ablation/`.
+
+§9A ran: two arms, **N=5 each**, interleaved so load is shared between them.
+
+```
+retrieval=on  n=5  ttrc median 5.14s (4.89–6.56)  post-detection 1.98s  tools 8  docs 5
+retrieval=off n=5  ttrc median 4.87s (4.72–6.39)  post-detection 1.85s  tools 6  docs 0
+delta post-detection median: +0.1279s    delta MCP calls: +2
+tokens 0   model calls 0   cost $0.00
+```
+
+### The headline caveat — do not lose this
+
+**The measurement §9A actually wants was NOT delivered.** Retrieval's effect is
+mediated entirely by the Diagnostician, which cannot run (`api.groq.com` denied
+at CONNECT). Both arms derived the root cause identically, so the published
+numbers are the **COST** of retrieval and say **nothing** about its benefit.
+
+That is weaker than a null result and the difference matters: a null means "we
+measured it, no effect"; this is "the mechanism was off, no effect was
+possible". `timings.json` carries
+`comparison.retrieval_could_affect_root_cause: false`, computed from
+`model_calls_total > 0`, and a test asserts it is currently false — so re-running
+with a key and forgetting to rewrite the prose fails the suite instead of
+silently lying.
+
+### Two timings, because either alone misleads
+
+TTRC includes `dbt run`, whose variance (4.72–6.56s across both arms) swamps the
+effect — **the +0.269s TTRC delta is inside the noise and must not be quoted.**
+Post-detection (failure observed → root cause available) is where the signal is:
++0.128s, +2 MCP calls, +4 evidence items. The `off` arm's 2.99s max is a cold
+first run; it is published, and the median keeps it from moving the headline.
+
+### §9C cost accounting
+
+$0.00 / 0 tokens / 0 model calls — real, and the reason is the story: the six
+deterministic agents genuinely cost nothing per incident, and the one agent that
+would cost money is the one that could not run. So **the interesting half of
+"what does it cost at 200 incidents a week" is unanswered.**
+
+### §12 — numbers are generated, not typed
+
+`examples/ablation/README.md` is rendered from `timings.json` by
+`scripts/render_ablation_readme.py`, marked `GENERATED FILE — DO NOT EDIT`, and
+`--check` is §12's one-line diff. A test runs it, so a hand-edited number in the
+published README fails CI.
+
+### Scope
+
+Read side only (§4 steps 2–9), deliberately: remediation and write-back would add
+minutes of noise per run and mutate the shared catalog ten times.
+`PriorKnowledge.retrieval_enabled` is separate from `documents_available`, so the
+off-arm says "RETRIEVAL DISABLED — no lookup attempted" rather than looking like
+a broken catalog.
+
+Tests 531 → 556.
 
 ---
 
