@@ -120,16 +120,26 @@ Raw evidence: `evidence/d2/03-upstreamLineage-dbt-features.json`,
 * **The DataHub UI lineage *graph* did not render the upstream nodes** in the
   screenshot captured at `evidence/d2/screenshots/01-lineage.png`. The page
   correctly shows the ingested model — `Columns 7`, `Properties 12`, and the real
-  SQL under View Definition — but the graph pane is empty, because DataHub's
-  graph index lags behind the entity index. **The lineage is proven through the
-  API, not through that screenshot**, and this document does not claim otherwise.
-  Re-capture once the graph index catches up.
-* **The ML model is not registered in DataHub as an `mlModel` entity yet.** §3
-  requires it "registered as an `mlModel` entity with lineage to its feature
-  source". The model is trained and real; the catalog registration is outstanding
-  and is D3 work.
-* **`get_dataset_queries` has not been verified** against this substrate. §3
-  requires either genuine query history or deleting the "real SQL touching the
-  dead column" claim. Outstanding.
-* **The rename has not been executed.** §4 step 1 (`user_id → customer_id`) is
-  D3; nothing here has broken yet.
+  SQL under View Definition — but the graph pane is empty. **The lineage is
+  proven through the API, not through that screenshot**, and this document does
+  not claim otherwise.
+
+  > **Corrected in D3.** This section originally attributed the empty graph pane
+  > to DataHub's "graph index lagging behind the entity index". That was wrong.
+  > The graph index had never been written: all 82 OpenSearch indices carried a
+  > flood-stage `read_only_allow_delete` block, so every ingestion write in this
+  > document reached MySQL and was rejected at the index layer. Diagnosis, proof
+  > and fix: `evidence/d3/00-opensearch-flood-stage-diagnosis.md`. **The lineage
+  > claims below are unaffected** — they were proven against the aspect store,
+  > not the graph. The screenshot is still stale and should be recaptured.
+
+* ~~**The ML model is not registered in DataHub as an `mlModel` entity yet.**~~
+  **Done in D3.** `urn:li:mlModel:(urn:li:dataPlatform:devguard_ml,devguard_churn_risk,PROD)`,
+  with a traversable 5-hop path from `raw.users`. See `evidence/d3/README.md` §1.
+* ~~**`get_dataset_queries` has not been verified** against this substrate.~~
+  **Verified in D3, and the claim survives:** it returns one real SYSTEM-sourced
+  query selecting `user_id` from `raw.users`. See `evidence/d3/README.md` §2.
+* ~~**The rename has not been executed.**~~ **Executed in D3** at
+  2026-08-01T02:16:51Z. dbt goes red; the deployed view and the ML job do not —
+  which turned out to be the more interesting result. See
+  `evidence/d3/break/00-README.md`.

@@ -14,6 +14,12 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0, D1, D2, D3 COMPLETE.**
+**D4 is the next phase and has NOT been started.** D3's write-up is the section
+"D3 COMPLETE" below; read `evidence/d3/README.md` before touching anything in the
+substrate, because the hero-loop rename is **still in place** and dbt is **still
+red on purpose**.
+
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
 Do **not** start T3 until the human decides how to handle the blocked three.
@@ -1334,6 +1340,135 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D3 COMPLETE — MODEL REGISTERED, QUERIES VERIFIED, LOOP BROKEN FOR REAL
+
+Evidence: **`evidence/d3/`** · read **`evidence/d3/README.md`** first, then
+**`evidence/d3/break/00-README.md`**.
+
+All three of D3's asks are done. One came out differently from the contract's
+prediction, and that difference is the most valuable thing in this phase.
+
+### Before anything else — the OpenSearch indices were silently empty
+
+Found while verifying step 1. **Every D2 ingestion write reached MySQL and was
+rejected at the index layer**: all 82 indices carried a flood-stage
+`read_only_allow_delete` block, and the MAE consumer logged each rejection and
+committed the offset anyway (Kafka lag was 0 — nothing retries those writes).
+
+```
+before:  datasetindex_v2  1   mlmodelindex_v2 0   graph_service_v1  20
+after:   datasetindex_v2 10   mlmodelindex_v2 1   graph_service_v1 172
+```
+
+Fixed by reclaiming 5.5 GB, setting the watermarks **persistently and as absolute
+free-space values** (`low=3gb high=2gb flood_stage=1gb` — the percentage defaults
+are wrong for a quota'd filesystem), clearing the blocks, and running
+`datahub-upgrade -u RestoreIndices` (`rowsMigrated=705`, SUCCEEDED).
+`RestoreIndices` replays committed aspects; it cannot invent one.
+
+**This corrects D2.** `SUBSTRATE.md` §5 blamed "graph index lag" for the empty UI
+graph pane. That was wrong — the graph index had never been written. D2's lineage
+claims are unaffected (they were proven against the aspect store), and
+`SUBSTRATE.md` now carries the correction inline. **The D2 screenshot is still
+stale and should be recaptured.**
+
+### 1. The ML model is registered, with lineage a blast radius can walk
+
+`urn:li:mlModel:(urn:li:dataPlatform:devguard_ml,devguard_churn_risk,PROD)` —
+platform **`devguard_ml`, deliberately not `mlflow`**, because we do not run
+MLflow and an mlflow URN would claim a tool that is not in this stack.
+
+Two live-server facts forced the design (integration findings 13–14):
+
+* **`upstreamLineage` is not a valid aspect for `mlModel`** — GMS returns 422.
+  The valid one is `mlModelTrainingData`, discoverable only from GMS's own
+  `/openapi/v3/api-docs/openapi-v3`.
+* **`mlModelTrainingData` creates no graph edge.** It stores and reads back
+  fine over REST, but produces zero rows in `graph_service_v1`, so impact
+  analysis cannot reach the model through it. The traversable modelling is
+  `mlModel --TrainedBy--> dataJob --Consumes--> dataset`.
+
+So the model carries both, and the chain resolves **5 hops end to end**:
+`raw.users → stg_users → user_order_features → train_churn_model (DATA_JOB) →
+devguard_churn_risk (MLMODEL)`.
+
+### 2. `get_dataset_queries` — verified, and §3's claim survives
+
+`get_dataset_queries(urn=raw.users)` returns **1 real query**, `source: SYSTEM`,
+actor `_ingestion`, derived by the postgres ingestion from the view definition:
+`SELECT user_id, email, country, signup_ts, is_active FROM raw.users WHERE is_active`.
+The `column="user_id"` filter narrows to it correctly. The feature table returns
+0, honestly — it is a table, not a view, and no query-log ingestion is configured.
+
+### 3. The break — executed, and §4's prediction was wrong
+
+`ALTER TABLE raw.users RENAME COLUMN user_id TO customer_id;` at
+**2026-08-01T02:16:51Z**. §4 predicts "dbt model + reporting query + feature job
+break". **Only dbt broke** (exit 1, `column "user_id" does not exist`).
+
+* The **deployed view kept working** — PostgreSQL binds views by attribute number
+  and silently rewrote it to `SELECT customer_id AS user_id`. Still 1715 rows.
+* The **ML job kept working** — the mart was SKIPped, not dropped, so it is
+  frozen and still has `user_id`. The model retrained on stale data, reported the
+  same **0.7995**, exit **0**.
+
+**This is drift, not an outage, and it is the stronger story:** one exit code is
+the only signal in the entire stack, while everything downstream reports success
+on data that no longer reflects its source. **Do not repeat §4's "feature job
+breaks" line anywhere** — it is false for this substrate.
+
+### 4. Blast radius, lineage impact, write-back
+
+All six §4-step-6 lineage calls green. The column-level path carries the **query
+entity in the middle** — the same `view_5ba31a4e…` that `get_dataset_queries`
+returned, which is what ties "SQL touches this column" to "here is where it goes":
+
+```
+raw.users.user_id → urn:li:query:view_5ba31a4e… → stg_users.user_id
+                  → user_order_features.user_id
+```
+
+**Getting that to work required finding a GMS bug** (integration finding 16, the
+strongest candidate yet): a **string**-typed structured property whose value
+parses as a URN causes a 500 NPE in `searchAcrossLineage`, which **disables
+`get_lineage_paths_between` entirely**. Proven by removing only that one value
+and re-running the identical call: error → success. `devguard.last_incident_urn`
+is therefore replaced by **`devguard.last_incident_id`** (bare UUID), and all
+three definitions are now committed as code at **`recipes/structured_properties.yaml`**
+— which closes §5's "register the definitions in the repo" trap.
+
+Write-back is deliberately **narrower than §8's five-artifact package**, because
+§8 says that package is post-verification only and nothing is verified yet. What
+was written is §4 step 10: incident `urn:li:incident:f01f744b-50fb-446d-96a1-4ecf43bc3001`
+left **ACTIVE**, a column-level tag and description on `user_id`, and
+`devguard.last_incident_id`. Not written: `verified_at`,
+`time_to_root_cause_s`, the Context Document, and `updateIncidentStatus(RESOLVED)`.
+
+**D1's smoke-test placeholders were removed** from `raw.users` —
+`verified_at = 2026-07-31T12:45:00Z` and `time_to_root_cause_s = 42.0` were
+write-path proof values sitting on a real dataset where they read as real
+measurements.
+
+### Also worth knowing
+
+* **`DATAHUB_TELEMETRY_ENABLED=false` is mandatory here.** Without it
+  `mcp-server-datahub` blocks ~90 s per call retrying Mixpanel POSTs that this
+  network 403s. Every call looks like a hang. (Finding 17.)
+* **Always read `inputSchema` from the running server.** Three more tools had
+  unguessable argument names this phase (finding 18).
+
+### Still open after D3
+
+* Nothing is fixed. The rename stands, dbt is red, the model trains on stale data.
+* The catalog has **not** been re-ingested — deliberate; the stale catalog is part
+  of the incident, and DevGuard's claim is detection from runtime evidence.
+* `evidence/d2/screenshots/01-lineage.png` needs recapturing.
+* §11.4 least-privilege service account still outstanding — still
+  `urn:li:corpuser:__datahub_system`.
+* T2 §6.3's four-agent trace still blocked on `api.groq.com` egress.
 
 ---
 
