@@ -14,11 +14,12 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0, D1, D2, D3 COMPLETE.**
-**D4 is the next phase and has NOT been started.** D3's write-up is the section
-"D3 COMPLETE" below; read `evidence/d3/README.md` before touching anything in the
-substrate, because the hero-loop rename is **still in place** and dbt is **still
-red on purpose**.
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0, D1, D2, D3, D4 COMPLETE.**
+**D5 is the next phase and has NOT been started.** D5 is the Diagnostician and
+the refusal path — the second half of the §14 D4–D5 gate ("refusal
+demonstrated"). Read `evidence/d4/README.md` and then `evidence/d3/README.md`
+before touching the substrate: the hero-loop rename is **still in place** and
+dbt is **still red on purpose**, and D4's evidence chain depends on it.
 
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
@@ -1340,6 +1341,90 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D4 COMPLETE — THE EVIDENCE CHAIN FORMS, ON REAL EVIDENCE
+
+Evidence: **`evidence/d4/README.md`** · proof pack:
+**`evidence/proof-pack/d4-evidence-chain/`** (13 artifacts).
+
+D4's half of the §14 D4–D5 gate is "Evidence chain formed". It forms:
+
+```
+evidence items      : 12
+sources             : ['DATAHUB_GRAPH', 'RUNTIME']
+chain digest        : a16d2927e4e56487
+CHAIN IS SUFFICIENT : True
+```
+
+Reproduce: `DATAHUB_TOKEN_FILE=<t> DBT_BIN=<dbt> python scripts/run_d4_evidence_chain.py`
+
+### What was built
+
+§4 steps 2 and 4–8 as bounded roles, in a new `backend/v2/` package that leaves
+T0–T2 code untouched:
+
+* `evidence.py` — §7's Evidence/EvidenceChain, and the sufficiency rule
+  (>=1 RUNTIME **and** >=1 DATAHUB_GRAPH) that gates the Diagnostician.
+* `handoff.py` — §6's AgentHandoff envelope + `AGENT_TOOL_ALLOWLISTS`.
+* `datahub_client.py` — one MCP stdio client; allowlist checked **before** any I/O.
+* `proofpack.py` — §12's redact-at-capture-time writer.
+* `sentinel.py`, `agents/{watcher,archivist,cartographer,pathfinder}.py`.
+
+**No LLM runs in any of them, deliberately.** §6 endorses this explicitly.
+Detection is an exit code, negotiation is a tool list, lineage is a graph read.
+The Diagnostician is where judgement lives, and it is D5.
+
+### Three things worth carrying forward
+
+**1. "Column-level, terminating at the ML model" is TWO queries.** §4 step 6
+asks for both in one; the live graph will not. `get_lineage(column="user_id")`
+returns 5 datasets and stops at the mart; without `column` it returns 7 and
+reaches the mlModel at hop 5. That is finding 14's consequence — the model's
+edge is dataset-level. Pathfinder runs both and reports them separately. **Never
+sum them.** (Finding 19.)
+
+**2. Capability negotiation is dynamic in both directions.** D0 saw 18 tools
+(mutations on, no documents → document tools hidden). D4 saw 8 (mutations off →
+all 12 mutation tools gone; a document now exists → both document tools appear).
+`TOOLS_IS_MUTATION_ENABLED=false` is real transport-level least privilege: a
+read agent cannot see a mutation tool. (Finding 20.)
+
+**3. A fabricated metric from our own code, caught by running it.** The first
+live run said "9 impacted" where the server's `total` said 5 — the parser was
+counting `entity` objects inside DataHub's facet aggregations (platform and
+container filter chips) as impacted assets. The tell was `degree: null` on every
+spurious row. Fixed to read `searchResults` only; pinned by
+`tests/test_pathfinder_parsing.py` against the real payload. Plausible fabricated
+numbers are the dangerous kind — nobody questions 9.
+
+### One refactor that touched T1 code
+
+`UNTRUSTED_CONTENT_RULE` and `fence_untrusted()` moved from
+`backend/core/ai_agent.py` to a new zero-import leaf module
+`backend/core/untrusted.py`, and are re-exported from their old home so every
+caller and T1's `tests/test_prompt_injection_boundary.py` are untouched (still
+green). They moved because importing them pulled in OpenTelemetry and the LLM
+runtime — the D4 runner crashed on exactly that. A security primitive that is
+expensive to import is one people route around.
+
+### Tests: 306 -> 434
+
+New: `test_evidence_contract.py` (§7 sufficiency, trust invariants, digest),
+`test_agent_allowlists.py` (§6's "verifiable, not claimed"),
+`test_sentinel_fencing.py` (§11.2), `test_proof_pack_redaction.py` (§12),
+`test_pathfinder_parsing.py` (the facet regression),
+`test_watcher_runtime_evidence.py`.
+
+### Still open after D4
+
+* **No LLM has run.** `api.groq.com` still blocked. D5's refusal path is
+  testable without a key; its success path is not.
+* **§11.7's injection demo beat is not built** — nothing hostile is seeded in
+  the catalog, so `untrusted items : 0` in this run is honest but untested live.
+* **The substrate is still broken on purpose.** Do not repair it before D5.
+* §11.4 least-privilege service account — outstanding for the fourth phase.
 
 ---
 

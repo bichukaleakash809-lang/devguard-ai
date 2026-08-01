@@ -42,6 +42,30 @@ from documentation.
 | 17 | `mcp-server-datahub` on a restricted network | **The server blocks ~90 s per tool call retrying Mixpanel telemetry.** `get_lineage` completes server-side in ~0.2 s (`get_lineage downstreams: Returned 2/2 entities`), then the process stalls on `POST /mp/track` and `/mp/engage` with four urllib3 retries each, because this environment 403s them at CONNECT. Every call looked like a hang. `DATAHUB_TELEMETRY_ENABLED=false` fixes it completely. | Yes — telemetry should be fire-and-forget or short-timeout; it should never sit on the response path. |
 | 18 | MCP argument names | **Three more tools whose argument names cannot be guessed**, continuing the D1 pattern: `get_dataset_queries` takes `urn` (not `dataset_urn`); `get_lineage_paths_between` takes `source_urn`/`target_urn` (not upstream/downstream); `add_structured_properties` takes `property_values` while `remove_structured_properties` takes `property_urns` + `entity_urns`. Every one of these was a validation error before reading the live `inputSchema`. | Recorded as a habit note rather than a bug: **always read `inputSchema` from the running server.** |
 
+## D4 — 2026-08-01
+
+| # | Surface | What happened | Contribution candidate? |
+|---|---|---|---|
+| 19 | `get_lineage` | **Column-level and dataset-level lineage have different termini, so §4 step 6's "blast radius, column-level, terminating at the ML model" is not satisfiable in one call.** `get_lineage(urn=raw.users, column="user_id", max_hops=5)` returns **5 entities**, all datasets, every one carrying `lineageColumns: ["user_id"]`, stopping at `user_order_features`. The same call *without* `column` returns **7**, continuing through `train_churn_model` (dataJob) to the mlModel at hop 5. Neither is wrong: this is finding 14's direct consequence — the model's edge is `dataJob --Consumes--> dataset`, which is dataset-level, so a schemaField traversal cannot reach it. DevGuard therefore runs **both** traces and reports them as two separate facts; summing them would be a fabricated count and picking one would either understate impact or lose column precision. | **Yes — docs, and possibly a feature.** Impact analysis is the headline use case, and "the precise answer and the complete answer are different queries" is not stated anywhere. Ideally column-level lineage would traverse dataset-level edges when no column edge exists, and mark those hops as column-unknown. |
+| 20 | MCP capability negotiation | **The tool set is dynamic in both directions, and D0 vs D4 demonstrates both.** D0 saw **18** tools (mutations enabled, empty catalog) — 6 read + 12 mutation, with `search_documents`/`grep_documents` **absent**. D4 saw **8** (mutations disabled, one document now exists) — the same 6 read tools plus the 2 document tools, with every mutation tool gone. So §5's documented trap is confirmed from the side D0 could not show: the document tools **appear** once the catalog holds a document. Worth stating plainly because a client that caches its tool list, or asserts a fixed count, is wrong on both axes. The corollary is a pleasant one: `TOOLS_IS_MUTATION_ENABLED=false` is genuine transport-level least privilege — a read-only agent cannot see a mutation tool, let alone call it. | Docs note. The mutation gate deserves a sentence in §5 as a security control, not just a feature flag. |
+
+### A DevGuard defect this phase found in our own code, recorded here for symmetry
+
+Not DataHub friction, but it belongs next to the findings above because it was
+caught by the same discipline and would have produced a fabricated number.
+
+**`get_lineage` responses embed `entity` objects inside their facet
+aggregations** — the platform and container filter chips. DevGuard's first
+Pathfinder parser walked the whole response and counted those as impacted
+assets, so a trace that genuinely touched **5** datasets was reported as **9
+impacted**, having swept in `urn:li:dataPlatform:postgres`,
+`urn:li:dataPlatform:dbt` and two container URNs. An inflated blast radius is a
+LAW 3 violation, and the plausible-looking kind is the dangerous kind. The tell
+was in the data: every spurious entry had `degree: null`, because facets have no
+hop count. Fixed to read `searchResults` only, cross-checked against the
+server's own `total`, and pinned by `tests/test_pathfinder_parsing.py` using the
+real captured payload.
+
 ### Carried in from the SigNoz track (same class of finding, different product)
 
 Not DataHub feedback, but recorded because it is exactly the kind of entry this
