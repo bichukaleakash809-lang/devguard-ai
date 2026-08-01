@@ -206,3 +206,167 @@ advisories, zero functionality), then bump `starlette` via a compatible
 `fastapi`, then resolve `chromadb`/`sentence-transformers`. Full per-advisory
 reasoning and raw output:
 `docs/audit-evidence/t2/python-dependency-advisories.txt`.
+
+---
+
+# DevGuard V2 — the DataHub agent posture (05_DATAHUB_MASTER §11)
+
+Everything above concerns the T-track scanner. This section covers the V2 agent
+that reads a shared catalog and writes back to it — a different threat surface,
+because the untrusted input is *metadata other people wrote* and the privileged
+action is *mutating a shared catalog*.
+
+Every claim below names the command that verifies it.
+
+## 1. Threat model (§11.1)
+
+| # | Threat | Realistic path | Control | Verified by |
+|---|---|---|---|---|
+| T1 | **Prompt injection via catalog free-text** | Anyone with catalog write access edits a dataset/column description, glossary term or Context Document, and the text reaches an agent's prompt | Screened and fenced as `UNTRUSTED_TEXT`; the agent that reads it holds **zero tools** | `scripts/run_injection_demo.py` (live) · `tests/test_sentinel_fencing.py` · `tests/test_diagnostician_refusal.py` |
+| T2 | **Over-broad mutation** | A bug or a manipulated agent writes to assets it was never meant to touch, or deletes one | Three-axis allowlist (tools, entity types, exact URNs) enforced *before* any I/O, plus a server-side Access Policy | `scripts/verify_least_privilege.py` (live) · `tests/test_security_posture.py` |
+| T3 | **Runaway autonomy** | A fix is applied nobody approved, or knowledge is written about a fix that did not work | `AUTONOMY_POLICY` — nothing is autonomous, CRITICAL has no approver; write-back refuses without a verified recovery **and** a named approver | `tests/test_writeback_rules.py` · `evidence/proof-pack/d6-fail-the-fix/` (zero artifacts written) |
+| T4 | **Token leakage** | A GMS or LLM token reaches a log, an evidence file, or a commit | Redaction at capture time; tokens read from a file outside the repo; secret scan over working tree and full history | `tests/test_proof_pack_redaction.py` · `make scan-secrets` |
+| T5 | **MCP server supply chain** | `uvx mcp-server-datahub` runs third-party code with a live token piped to it | Pinned version (`versions.env`); mutation tools gated off unless explicitly enabled; the client speaks exactly three JSON-RPC methods | `backend/v2/datahub_client.py` · `tests/test_agent_allowlists.py` |
+| T6 | **Escalation of its own grants** | The agent creates a policy granting itself more | `MANAGE_POLICIES` never granted; verified as a live DENY | `scripts/verify_least_privilege.py` |
+
+## 2. Untrusted-content boundary (§11.2)
+
+All catalog free-text is `UNTRUSTED_TEXT` by construction — the `Evidence` model
+refuses to let a `DATAHUB_DOCUMENT` item claim `TRUSTED_SYSTEM`. The only
+prompt-ready representation is `ScreenedText.fenced`; there is no accessor
+returning the raw string for prompt use.
+
+**The defence is architectural, not textual.** Detection is a signal; what makes
+an injection harmless is that the Diagnostician holds no tools and cannot obtain
+any — its constructor takes no client and the module never imports one (asserted
+by AST, not string match).
+
+Measured live against the real catalog (§11.7, `scripts/run_injection_demo.py`):
+
+```
+Sentinel verdict           : LIKELY
+  override-previous, role-reassignment, action-directive,
+  suppress-findings, exfiltration, tool-naming
+untrusted evidence fenced  : True
+raw payload in the prompt  : False      <- stronger than fenced
+instruction obeyed         : False
+  certified tag applied    : False
+  mutating tool calls      : 0 of 2 total
+```
+
+The payload never reaches the reasoning prompt at all: evidence claims are
+one-line summaries, so the attacker's text stays in the proof pack as a subject
+of analysis rather than an input to it. The hostile description is reverted at
+the end of the run.
+
+## 3. Mutation allowlist (§11.3)
+
+Three axes, all enforced in `DataHubMCPClient.call` **before** the request is
+written to the pipe.
+
+| axis | value | where |
+|---|---|---|
+| tools | `add_tags`, `update_description`, `save_document`, `add_structured_properties`, `add_owners` — held by **Scribe only** | `AGENT_TOOL_ALLOWLISTS` |
+| entity types | `dataset`, `document` | `MUTABLE_ENTITY_TYPES` |
+| scope | five named dataset URNs | `MUTATION_SCOPE_URNS` |
+
+Reads are deliberately unrestricted: the blast radius of reading a dataset
+DevGuard does not own is nil, and narrowing reads would break lineage traversal.
+
+This duplicates the server-side Access Policy on purpose, and in D9 that stopped
+being theoretical — see §4.
+
+## 4. Least privilege (§11.4)
+
+Service account **`urn:li:corpuser:devguard_agent`**
+(`scripts/setup_service_account.py`), replacing `urn:li:corpuser:__datahub_system`,
+which D1–D8 used and which holds `manageIngestion` and `managePolicies`.
+
+| §8 artifact | privilege required |
+|---|---|
+| read: search, lineage, schema, queries | `VIEW_ENTITY_PAGE` |
+| 1 — incident raised and resolved | `EDIT_ENTITY_INCIDENTS` |
+| 2 — post-mortem runbook | `MANAGE_DOCUMENTS` (platform) |
+| 3 — column-level tag | `EDIT_DATASET_COL_TAGS` |
+| 3 — column-level description | `EDIT_DATASET_COL_DESCRIPTION` |
+| 4 — structured properties | `EDIT_ENTITY_PROPERTIES` |
+| 5 — ownership | `EDIT_ENTITY_OWNERS` |
+
+Scoped to **five named dataset URNs**, not a domain. §11.4 says "scoped to one
+domain"; this substrate has none, and inventing one purely to satisfy the wording
+would scope the policy to a container existing only for the policy. A URN
+allowlist is strictly narrower — a domain grants access to whatever is later
+added to it.
+
+**Never granted, each verified as a live DENY:** `DELETE_ENTITY`, `EDIT_LINEAGE`,
+`EDIT_ENTITY_STATUS`, `MANAGE_POLICIES`, `MANAGE_INGESTION`,
+`EDIT_ENTITY_GLOSSARY_TERMS`, `EDIT_DOMAINS_PRIVILEGE`.
+
+```
+$ python scripts/verify_least_privilege.py
+ALLOW: 4/4 behaved as required
+DENY : 5/5 correctly refused
+```
+
+**That script is why this section is trustworthy.** On its first run the account
+passed all four ALLOW cases *and all five DENY cases also succeeded* — a failed
+verification in which nothing errored. The cause: the DataHub quickstart ships
+with **`METADATA_SERVICE_AUTH_ENABLED=false`**, under which Access Policies are
+not enforced at all. For the whole of D1–D8 the server-side control was silently
+absent. Enabling it is now a documented prerequisite.
+
+## 5. Autonomy policy (§11.5)
+
+`AUTONOMY_POLICY` in `backend/v2/agents/magistrate.py` is the same object the
+docs render and the code branches on, so published and enforced cannot drift.
+
+| risk | allowed action | who approves |
+|---|---|---|
+| LOW | propose + validate; apply only after approval | asset owner from the graph |
+| MEDIUM | propose + validate; apply only after approval | asset owner from the graph |
+| HIGH | propose + validate; apply only after approval | asset owner (always named) |
+| CRITICAL | nothing applied; recorded and escalated | **nobody — no approval path exists** |
+
+**Nothing is autonomous in this build**, asserted by a module-level `assert`.
+`ApprovalRequest.approve()` raises `PermissionError` for CRITICAL, so no identity
+can authorise destructive DDL, a data mutation, a permission change or a
+hard-coded credential.
+
+## 6. Auditability (§11.6)
+
+Every tool call, prompt, decision and write lands in
+`evidence/proof-pack/<run-id>/` with the evidence chain that justified it and the
+approver's identity. `AgentHandoff` records `from_agent`, `to_agent`,
+`evidence_ids`, `decision`, measured duration, tokens and model. Every write-back
+artifact carries the §8 stamp with evidence ids and the chain digest.
+
+## 7. Secret hygiene (§11.8)
+
+* **Redaction at capture time** — `backend/v2/proofpack.py` is the only writer
+  into `evidence/`, and it redacts bearer tokens, JWTs, API-key shapes,
+  `*_TOKEN`/`*_SECRET`/`*_PASSWORD` assignments, and emails → `owner@example.com`.
+  A token cannot reach an evidence file even if something logs it.
+* **Secret scanning in `make verify`** — `make scan-secrets` runs
+  `scripts/scan_secrets.py` over every tracked file (9 patterns, 2 documented
+  allowlist entries). CI runs the same scanner plus the full-history scan.
+* Tokens are read at runtime from `DATAHUB_TOKEN_FILE`, `chmod 600`, outside the
+  repository. Never logged, never echoed, never committed.
+
+Local throwaway credentials for the disposable substrate Postgres (`devguard`,
+`devguard_eval`) **are** committed, deliberately, and documented in
+`substrate/dbt/profiles.yml`. They reach a container holding generated rows.
+
+## 8. Known gaps in the V2 posture
+
+* **The injection screen is a shape-matcher.** Novel phrasings will pass it. The
+  zero-tool Diagnostician is what actually holds.
+* **`METADATA_SERVICE_AUTH_ENABLED` must be `true`.** The quickstart default is
+  `false`, under which none of §4's policies do anything. Anyone reproducing this
+  must check it.
+* **The approver is the local operator** in every recorded run, not an
+  independent reviewer on a real team.
+* **`save_document` is granted platform-wide.** Documents are not
+  resource-scoped in DataHub's privilege model, so no narrower grant exists for
+  §8 artifact 2.
+* **No defence against a compromised DataHub server.** DevGuard distrusts the
+  catalog's free-text while trusting its structure — schemas, lineage, URNs.

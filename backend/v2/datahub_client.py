@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional
 
-from backend.v2.handoff import ToolAllowlist, ToolCallRecord
+from backend.v2.handoff import ToolAllowlist, ToolCallRecord, check_mutation_scope
 
 DEFAULT_GMS_URL = "http://localhost:8080"
 DEFAULT_MCP_PACKAGE = "mcp-server-datahub@0.6.0"
@@ -197,11 +197,13 @@ class DataHubMCPClient:
     def call(self, agent: str, tool: str, arguments: dict) -> ToolResult:
         """Invoke a tool as `agent`, enforcing that agent's allowlist first.
 
-        The allowlist check is the first statement on purpose. §11.3 wants the
-        mutation allowlist "enforced in code"; enforcing it after the request is
-        already on the wire would enforce nothing.
+        The allowlist check is the first statement on purpose, and the entity
+        scope check is the second. §11.3 wants the mutation allowlist "enforced
+        in code" across tools, entity types and scope; enforcing any of it after
+        the request is already on the wire would enforce nothing.
         """
         ToolAllowlist(agent).check(tool)
+        check_mutation_scope(tool, arguments)
 
         if not self.capabilities.has(tool):
             # Not an error — this is capability negotiation. §5's trap says some

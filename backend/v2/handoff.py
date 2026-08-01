@@ -138,6 +138,78 @@ MUTATION_TOOLS: frozenset[str] = frozenset({
 })
 
 
+#: §11.3 requires the mutation allowlist to enumerate "which tools, which entity
+#: types, which domain". Tools are above; these are the other two axes.
+#:
+#: This duplicates the DataHub Access Policy created by
+#: `scripts/setup_service_account.py`, on purpose. The policy is the real
+#: control — it is enforced by the server and cannot be bypassed by a bug in
+#: our code. This is the application-layer half of defence in depth, and it
+#: fails *closed* and *early*: an out-of-scope write never leaves the process,
+#: so it never depends on the server being configured correctly.
+#:
+#: That distinction stopped being theoretical in D9: the DataHub quickstart
+#: ships with `METADATA_SERVICE_AUTH_ENABLED=false`, under which Access Policies
+#: are not enforced at all. For the whole of D1–D8 the server-side control was
+#: silently absent. This check would still have held.
+MUTABLE_ENTITY_TYPES: frozenset[str] = frozenset({"dataset", "document"})
+
+#: The exact assets DevGuard may write to. Same five datasets as the Access
+#: Policy. Documents have no stable URN before creation, so they are scoped by
+#: entity type only.
+MUTATION_SCOPE_URNS: frozenset[str] = frozenset({
+    "urn:li:dataset:(urn:li:dataPlatform:postgres,devguard.raw.users,PROD)",
+    "urn:li:dataset:(urn:li:dataPlatform:postgres,devguard.raw.orders,PROD)",
+    "urn:li:dataset:(urn:li:dataPlatform:postgres,devguard.analytics_staging.stg_users,PROD)",
+    "urn:li:dataset:(urn:li:dataPlatform:postgres,devguard.analytics_staging.stg_orders,PROD)",
+    "urn:li:dataset:(urn:li:dataPlatform:postgres,devguard.analytics_marts.user_order_features,PROD)",
+})
+
+#: Argument names that carry the entity a mutation targets. Read from the live
+#: inputSchemas during D1/D6 rather than guessed (integration findings 18, 21).
+_TARGET_ARGUMENTS = ("entity_urns", "entity_urn", "urns", "urn", "related_assets")
+
+
+class EntityNotInScopeError(PermissionError):
+    """Raised when a mutation targets an asset outside the §11.3 allowlist."""
+
+    def __init__(self, tool: str, urn: str) -> None:
+        self.tool, self.urn = tool, urn
+        super().__init__(
+            f"{tool!r} may not mutate {urn!r}: it is outside DevGuard's declared "
+            f"mutation scope (§11.3). Widening the scope is a config change and a "
+            f"code review, not a runtime decision.")
+
+
+def entity_type_of(urn: str) -> str:
+    """`urn:li:<entityType>:(...)` -> `<entityType>`."""
+    parts = urn.split(":", 3)
+    return parts[2] if len(parts) > 2 else ""
+
+
+def check_mutation_scope(tool: str, arguments: dict) -> None:
+    """Fail closed if a mutation names an entity outside the allowlist.
+
+    Only mutation tools are checked. Reads are deliberately unrestricted: the
+    blast radius of reading a dataset DevGuard does not own is nil, and
+    narrowing reads would break lineage traversal, which is the entire point of
+    the Pathfinder.
+    """
+    if tool not in MUTATION_TOOLS:
+        return
+    for name in _TARGET_ARGUMENTS:
+        value = arguments.get(name)
+        if value is None:
+            continue
+        for urn in (value if isinstance(value, (list, tuple)) else [value]):
+            if not isinstance(urn, str) or not urn.startswith("urn:li:"):
+                continue
+            if entity_type_of(urn) not in MUTABLE_ENTITY_TYPES:
+                raise EntityNotInScopeError(tool, urn)
+            if entity_type_of(urn) == "dataset" and urn not in MUTATION_SCOPE_URNS:
+                raise EntityNotInScopeError(tool, urn)
+
+
 class ToolAllowlist:
     """Enforcement, not documentation.
 

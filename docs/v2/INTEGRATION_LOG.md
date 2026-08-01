@@ -89,6 +89,13 @@ no test would have caught them.
    `SKIPPED_DRY_RUN` was not counted as "landed", so a preview cascaded into
    §8's partial-failure path. Nothing had failed; nothing had been attempted.
 
+## D9 — 2026-08-06
+
+| # | Surface | What happened | Contribution candidate? |
+|---|---|---|---|
+| 23 | `datahub docker quickstart` | **The quickstart ships with `METADATA_SERVICE_AUTH_ENABLED=false`, under which Access Policies are not enforced at all.** You can create a scoped service account, attach METADATA and PLATFORM policies, see them ACTIVE in the UI and in `listPolicies` — and the account can still delete datasets, rewrite lineage, write to assets outside its scope, and create a policy granting itself `MANAGE_POLICIES`. Nothing errors and nothing warns. Found by running a nine-check allow/deny matrix against the live server: all four ALLOW cases passed and **all five DENY cases also passed**. Setting the flag to `true` and recreating GMS makes every DENY behave correctly. | **Yes — the strongest security-side candidate.** A default under which the entire authorization model is inert, with a fully functional policy UI on top of it, is a trap that scales: anyone building least-privilege automation against a quickstart will believe they have it. Either the default should flip, or the policy UI should carry a banner when the flag is off. |
+| 24 | `add_owners` (GraphQL) | The GraphQL `addOwners` mutation takes `ownershipTypeUrn` as a full URN (`urn:li:ownershipType:__system__technical_owner`), while the MCP tool of the same name takes `ownership_type` as a bare identifier (`__system__technical_owner`). Two spellings of the same concept across two surfaces of the same product; each rejects the other's form. Minor, but it cost a round of debugging on top of finding 21. | Docs note |
+
 ### Carried in from the SigNoz track (same class of finding, different product)
 
 Not DataHub feedback, but recorded because it is exactly the kind of entry this

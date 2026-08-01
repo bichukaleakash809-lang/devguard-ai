@@ -14,10 +14,10 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D7 COMPLETE. D8 §9B COMPLETE.**
-**§11's security work — including the live injection demo (§11.7) and the
-least-privilege service account (§11.4) — is NOT done.** It was explicitly
-scoped out of D8, which was §9B only. Read `evidence/d8/README.md` first. The hero-loop rename is **still in
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D9 COMPLETE.**
+All of §11 is now done and verified live. Read `evidence/d9/README.md` first —
+it contains the single most important operational fact in the project:
+**DataHub was not enforcing authorization at all until D9.** The hero-loop rename is **still in
 place** and dbt is **still red on purpose** — that is the committed state, and
 D3–D7 evidence all depend on it. `scripts/reset_demo.py` restores it after any
 run.
@@ -1342,6 +1342,75 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D9 COMPLETE — §11 SECURITY, AND THE FINDING THAT MATTERS MOST
+
+Evidence: **`evidence/d9/README.md`** · **`SECURITY.md`** (V2 section appended,
+T1's content intact) · packs under `evidence/proof-pack/security/`.
+
+### READ THIS FIRST: DataHub was not enforcing authorization
+
+`scripts/verify_least_privilege.py` runs 9 checks as the new service account —
+4 things it must do, **5 it must not**. First run:
+
+```
+ALLOW: 4/4    DENY: 0/5
+```
+
+Every ALLOW passed and **every DENY also passed**. The account could delete
+datasets, rewrite lineage, write outside its scope, and grant itself
+`MANAGE_POLICIES`. Nothing errored; the policies were ACTIVE in the UI.
+
+Cause: the quickstart ships **`METADATA_SERVICE_AUTH_ENABLED=false`**, under
+which Access Policies are inert. **For all of D1–D8 the server-side control was
+silently absent.** Fixed by flipping it to `true` on the GMS container
+(preserving `DATAHUB_TOKEN_SERVICE_*` so existing tokens stay valid) and
+recreating it. Re-run: **ALLOW 4/4, DENY 5/5.**
+
+**This change lives in `~/.datahub/quickstart/docker-compose.yml`, outside the
+repo.** Anyone reproducing must set it. Integration finding 23.
+
+### §11.4 — service account
+
+`urn:li:corpuser:devguard_agent` replaces `__datahub_system`. Six metadata
+privileges + `MANAGE_DOCUMENTS`, scoped to **five named dataset URNs** (not a
+domain — this substrate has none, and a URN allowlist is strictly narrower).
+Never granted, each proven as a live DENY: `DELETE_ENTITY`, `EDIT_LINEAGE`,
+`EDIT_ENTITY_STATUS`, `MANAGE_POLICIES`, `MANAGE_INGESTION`, glossary, domains.
+
+### §11.7 — live injection demo
+
+Hostile description written to the **real** `raw.users.country`, read back
+through the normal path, then reverted.
+
+```
+Sentinel verdict          : LIKELY (6 patterns)
+untrusted evidence fenced : True
+raw payload in the prompt : False     <- stronger than fenced
+instruction obeyed        : False   certified tag: False   mutating calls: 0/2
+```
+
+Detection is **not** the result — the pattern list is a shape-matcher. The
+result is that the instruction was not obeyed, measured against the live catalog.
+The payload never reaches the prompt at all: evidence claims are one-line
+summaries, so attacker text stays in the proof pack as a subject of analysis.
+
+### §11.3 — the other two axes
+
+`check_mutation_scope()` now runs on the call path after the tool check: entity
+types (`dataset`, `document`) and the same five URNs. Fails closed **before any
+I/O**, so it holds even when the server-side policy does not — which, as above,
+it did not.
+
+### §11.8 — secret scan in `make verify`
+
+`scripts/scan_secrets.py`, 9 patterns over 617 tracked files, wired into
+`make verify` and CI. A test plants a fake key to prove the scanner fires.
+
+Tests 589 → 628. MCP read path re-smoked under enforced auth (8 tools,
+`get_lineage` 7,515 bytes).
 
 ---
 

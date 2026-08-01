@@ -48,8 +48,12 @@ ablation:  ## Retrieval ablation (05 §9A). Needs the substrate, DataHub and a t
 	$(PYTHON) scripts/run_ablation.py -n 5
 	$(PYTHON) scripts/render_ablation_readme.py
 
+.PHONY: scan-secrets
+scan-secrets:  ## Secret scan over every tracked file (05 §11.8)
+	$(PYTHON) scripts/scan_secrets.py
+
 .PHONY: verify
-verify: test verify-otel lint build  ## Everything CI runs, locally
+verify: test scan-secrets verify-otel lint build  ## Everything CI runs, locally
 	@echo ""
 	@echo "verify: all checks passed."
 
