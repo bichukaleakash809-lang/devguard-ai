@@ -66,6 +66,29 @@ hop count. Fixed to read `searchResults` only, cross-checked against the
 server's own `total`, and pinned by `tests/test_pathfinder_parsing.py` using the
 real captured payload.
 
+## D6 — 2026-08-03
+
+| # | Surface | What happened | Contribution candidate? |
+|---|---|---|---|
+| 21 | `add_owners` | **`ownership_type` is REQUIRED on `add_owners` and OPTIONAL on `remove_owners`**, and the accepted values are internal identifiers, not the friendly names the description uses. The first full write-back run failed artifact 5 with `ownership_type: Missing required argument`; the live enum turns out to be `__system__technical_owner` / `__system__business_owner` / `__system__data_steward`, while the field's own description talks about `TECHNICAL_OWNER`, `BUSINESS_OWNER`, `DATA_STEWARD`. D1 deliberately left this tool unexercised ("the same shape as `add_tags`, which is proven") — and it was not the same shape. | **Yes — two.** (a) The add/remove asymmetry deserves a line in the docs. (b) The description names three values the enum does not accept; either the description or the enum should change. |
+| 22 | `search_documents` + `grep_documents` | **They are a two-stage API and nothing says so.** `search_documents(query)` returns `searchResults[].entity` with `urn`, `subType` and `info.title` — and deliberately **no content** ("to avoid context bloat", per the shipped GraphQL comment). `grep_documents` then requires `urns` **and** `pattern`, so it cannot be called standalone: its input is the previous tool's output. A client that calls them independently, as ours did, gets a hit list it cannot read and a grep that fails validation. The symptom was the dangerous kind — DevGuard reported a confident "NO PRIOR KNOWLEDGE" while the runbook it had written minutes earlier was in the result set. | **Yes — docs.** The retrieval half of the hero loop depends on this pairing, and the dependency is invisible from either tool's schema alone. A one-line "use the URNs from `search_documents`" in `grep_documents`' description would have prevented it. |
+
+### DevGuard defects this phase found in our own code
+
+Recorded here for symmetry, and because each needed the loop to actually run —
+no test would have caught them.
+
+1. **`add_owners` arguments were guessed, not read.** Finding 18's lesson,
+   repeated by us. The upside was real evidence for §8: the partial-failure
+   policy correctly **held the incident ACTIVE** rather than asserting a
+   verified state whose supporting knowledge was missing.
+2. **A false "NO PRIOR KNOWLEDGE".** See finding 22. The worst failure mode
+   this agent has, and it reported success while doing it. D4 and D5 were
+   re-checked and are unaffected — both genuinely returned `total: 0`.
+3. **A dry run reported a partial failure that never happened.**
+   `SKIPPED_DRY_RUN` was not counted as "landed", so a preview cascaded into
+   §8's partial-failure path. Nothing had failed; nothing had been attempted.
+
 ### Carried in from the SigNoz track (same class of finding, different product)
 
 Not DataHub feedback, but recorded because it is exactly the kind of entry this

@@ -15,10 +15,12 @@ opposed to that a catalog says something is a certain way.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -116,6 +118,59 @@ class RuntimeEvidenceProvider:
             missing_column=column,
             passed=passed, errored=errored, skipped=skipped,
             stdout_tail=clean[-8000:],
+        )
+
+
+@dataclass(frozen=True)
+class LiveSchema:
+    """What the DATABASE says a table's columns are, right now.
+
+    Deliberately separate from anything the catalog reports. During drift the
+    two disagree, and that disagreement is the incident — a probe that fell back
+    to catalog metadata when the database was awkward would erase the finding.
+    """
+
+    table: str
+    columns: tuple[str, ...]
+    probed_at_utc: str
+
+
+class ColumnProbe:
+    """Reads `information_schema.columns` from the live database.
+
+    §6 gives the Referee "verification queries", and this is one: a read-only
+    question asked of the real system. It exists because the Surgeon cannot
+    responsibly propose a rename fix without knowing what the column is actually
+    called now, and the catalog does not know — it is stale by definition during
+    a drift incident.
+    """
+
+    def __init__(self, dsn: Optional[dict] = None) -> None:
+        # Defaults match substrate/docker-compose.yml. Password is a local
+        # throwaway credential, same as substrate/dbt/profiles.yml (§11.8).
+        env = os.environ
+        self.dsn = dsn or {
+            "host": env.get("SUBSTRATE_PG_HOST", "localhost"),
+            "port": int(env.get("SUBSTRATE_PG_PORT", "5433")),
+            "user": env.get("SUBSTRATE_PG_USER", "devguard"),
+            "password": env.get("SUBSTRATE_PG_PASSWORD", "devguard"),
+            "dbname": env.get("SUBSTRATE_PG_DB", "devguard"),
+        }
+
+    def probe(self, schema: str, table: str) -> LiveSchema:
+        import psycopg2
+
+        with psycopg2.connect(**self.dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (schema, table),
+            )
+            columns = tuple(row[0] for row in cur.fetchall())
+        return LiveSchema(
+            table=f"{schema}.{table}", columns=columns,
+            probed_at_utc=datetime.now(timezone.utc).isoformat(),
         )
 
 

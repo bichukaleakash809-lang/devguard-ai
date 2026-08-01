@@ -14,13 +14,12 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D5 COMPLETE.**
-**D6 is the next phase and has NOT been started.** D6 is the write side —
-Surgeon, Referee, Magistrate, Scribe (§4 steps 11–18). Read
-`evidence/d5/README.md` first, then `evidence/d4/` and `evidence/d3/`: the
-hero-loop rename is **still in place** and dbt is **still red on purpose**, and
-both D4's and D5's evidence depend on it. Do not repair the substrate before D6
-intends to.
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D6 COMPLETE.**
+**D7 is the next phase and has NOT been started.** D7 is the ablation (§9A),
+N>=5 both arms, cost/token accounting, raw runs into `examples/`. Read
+`evidence/d6/README.md` first. The hero-loop rename is **still in place** and
+dbt is **still red on purpose** — that is the committed state, and D3/D4/D5/D6
+evidence all depend on it. `scripts/reset_demo.py` restores it after any run.
 
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
@@ -1342,6 +1341,91 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D6 COMPLETE — THE LOOP CLOSES, TWICE, FROM CLEAN STATE
+
+Evidence: **`evidence/d6/README.md`** · packs: `d6-loop-pass1`, `d6-loop-pass2`,
+`d6-fail-the-fix`, `d6-dry-run`.
+
+§4 steps 11–18 plus the retrieval side run end to end, twice from clean state.
+All five §8 artifacts land; the incident is RESOLVED in DataHub's own UI.
+
+```
+[archivist]     PREVIOUS VERIFIED INCIDENT — 3 document(s) retrieved
+[surgeon]       OK: customer_id            [sentinel] risk=LOW blocked=False
+[referee]       validation passed=True (isolated schema)
+[magistrate]    risk=LOW mode=NAMED_OWNER owners=['DataHub']
+[human]         approved by DataHub Admin (local operator)
+[referee]       RECOVERY VERIFIED = True (exit 0, PASS=3)
+   3. column annotation  written   2. runbook  written   4. structured facts written
+   5. ownership  already_present   1. incident resolved  written
+```
+
+Live catalog after: `raw.users` — **5 RESOLVED** incidents, 2 ACTIVE, owner set.
+Both ACTIVE ones are correct: D3's original (nothing was verified) and the first
+D6 run, which §8's partial-failure policy held open.
+
+**STEP 9 IS STILL BLOCKED.** The Diagnostician runs and reports
+`REASONER_UNAVAILABLE` on every pass. The loop continues because **the Surgeon
+is driven by the typed evidence chain, not by prose** — the fix derives from
+`column "user_id" does not exist` plus a live `information_schema` probe. The
+`root_cause` written into the runbook says so in the artifact itself: *"Derived
+deterministically from runtime evidence — NOT produced by a language model."*
+`--require-diagnosis` halts the run without a model-produced root cause.
+So "the **full** §4 loop runs end to end" is **not** yet true. Do not claim it.
+
+### §8's two demonstrations, both real
+
+* `--fail-the-fix` → validation fails → **no `scribe/` directory exists at all**,
+  working tree never patched, no approval recorded.
+* `--dry-run` → every payload captured as `scribe/dry-run-*.json`, zero mutations
+  issued. It governs the **write-back**, so the fix is still applied and verified
+  locally.
+
+### Three defects of ours, none catchable without running the loop
+
+1. **`add_owners` arguments guessed, not read** — finding 18's lesson repeated.
+   `ownership_type` is required (and optional on `remove_owners`), values are
+   `__system__*`. Finding 21. The upside: §8's partial-failure policy visibly
+   held the incident ACTIVE.
+2. **A false "NO PRIOR KNOWLEDGE"** — `search_documents` had returned 2 hits
+   including our own runbook. The two document tools are a **two-stage** API
+   (`search` gives URNs with no content; `grep` needs those `urns`). Finding 22.
+   Worst failure mode this agent has: it reported a clean miss. D4/D5 checked and
+   unaffected — they genuinely returned `total: 0`.
+3. **Dry run reported a partial failure that never happened** —
+   `SKIPPED_DRY_RUN` was not counted as landed.
+
+### Deliberate departures from §6, each with a reason
+
+* **Surgeon is deterministic.** For an unambiguous rename (one column
+  referenced-but-missing, one present-but-unreferenced) there is no judgement
+  call; when ambiguous it **refuses**, because a wrong mapping builds green and
+  computes wrong numbers. Covers one fix class — a general repairer needs a model.
+* **The fix aliases (`customer_id as user_id`)** rather than renaming, keeping
+  the contract to `user_order_features` and the mlModel intact.
+* **Never touches the working tree.** `git hash-object` + a temp index commits
+  the patch to `devguard/fix-<incident>` with the file on disk unchanged.
+* **`AUTONOMY_POLICY` is the code and the docs** — one object, so they cannot
+  drift. CRITICAL has no approver and `approve()` raises for it.
+
+### Repo state — important
+
+**The substrate is committed BROKEN on purpose**, so D3/D4/D5 evidence stays
+reproducible. `scripts/reset_demo.py` restores that state and documents what
+cannot be un-written (incidents, documents, descriptions, properties).
+The fixes live on `devguard/fix-*` branches.
+
+### Still open after D6
+
+* Step 9 (`api.groq.com` blocked at CONNECT, re-probed in `evidence/d5/`).
+* §11.7 injection demo beat — no hostile description seeded yet.
+* The "unowned asset" branch of artifact 5 only ever ran once, by design.
+* §11.4 least-privilege service account — sixth phase running.
+
+Tests 480 → 531.
 
 ---
 

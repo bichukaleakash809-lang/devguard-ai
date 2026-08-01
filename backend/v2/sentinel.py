@@ -34,6 +34,7 @@ from backend.core.untrusted import UNTRUSTED_CONTENT_RULE, fence_untrusted
 
 __all__ = [
     "InjectionRisk", "InjectionFinding", "ScreenedText", "Sentinel",
+    "PatchRisk", "PatchFinding", "PatchScan",
     "UNTRUSTED_CONTENT_RULE", "fence_untrusted",
 ]
 
@@ -123,8 +124,73 @@ class ScreenedText:
         return fence_untrusted(self.field, self.original)
 
 
+class PatchRisk(str, Enum):
+    """§11.5's risk classes, as they apply to a proposed change."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True)
+class PatchFinding:
+    rule: str
+    risk: PatchRisk
+    detail: str
+
+
+@dataclass(frozen=True)
+class PatchScan:
+    """The verdict on a proposed diff (§4 step 12)."""
+
+    files_touched: tuple[str, ...]
+    added_lines: int
+    removed_lines: int
+    findings: tuple[PatchFinding, ...]
+
+    @property
+    def risk(self) -> PatchRisk:
+        order = [PatchRisk.LOW, PatchRisk.MEDIUM, PatchRisk.HIGH, PatchRisk.CRITICAL]
+        return max((f.risk for f in self.findings), key=order.index, default=PatchRisk.LOW)
+
+    @property
+    def blocked(self) -> bool:
+        """CRITICAL never proceeds, regardless of who would approve it."""
+        return self.risk is PatchRisk.CRITICAL
+
+
+#: Patterns that make a *proposed change* dangerous, as opposed to text that
+#: makes a *description* suspicious. Destructive DDL in a fix is the case worth
+#: catching: an agent that can propose `drop table` and get it rubber-stamped is
+#: a liability no amount of prompt discipline fixes.
+_PATCH_RULES: tuple[tuple[str, re.Pattern, PatchRisk, str], ...] = (
+    ("destructive-ddl",
+     re.compile(r"(?i)^\+.*\b(drop|truncate)\s+(table|schema|database|view)\b", re.M),
+     PatchRisk.CRITICAL, "adds destructive DDL"),
+    ("data-mutation",
+     re.compile(r"(?i)^\+.*\b(delete\s+from|update\s+\w+\s+set|insert\s+into)\b", re.M),
+     PatchRisk.CRITICAL, "adds a data mutation"),
+    ("grant",
+     re.compile(r"(?i)^\+.*\b(grant|revoke|alter\s+role|create\s+user)\b", re.M),
+     PatchRisk.CRITICAL, "changes database permissions"),
+    ("filter-removed",
+     re.compile(r"(?i)^-.*\bwhere\b", re.M),
+     PatchRisk.HIGH, "removes a WHERE clause — row counts may change silently"),
+    ("secret-literal",
+     re.compile(r"(?i)^\+.*\b(password|secret|token|api[_ ]?key)\s*=\s*['\"]\S+", re.M),
+     PatchRisk.CRITICAL, "hard-codes a credential"),
+    ("config-change",
+     re.compile(r"(?i)^\+\+\+ b/.*\.(yml|yaml|toml|cfg|ini|env)$", re.M),
+     PatchRisk.MEDIUM, "touches configuration, not just SQL"),
+    ("wide-change",
+     re.compile(r"^\+\+\+ b/", re.M),
+     PatchRisk.LOW, "file touched"),
+)
+
+
 class Sentinel:
-    """Screens catalog free-text. Holds no DataHub tools, by §6's table."""
+    """Screens catalog free-text AND proposed changes. Holds no DataHub tools (§6)."""
 
     NAME = "sentinel"
 
@@ -142,6 +208,38 @@ class Sentinel:
 
     def screen_all(self, fields: Iterable[tuple[str, str | None]]) -> tuple[ScreenedText, ...]:
         return tuple(self.screen(name, value) for name, value in fields)
+
+    def scan_patch(self, diff: str) -> PatchScan:
+        """§4 step 12: scan the proposed change and classify its risk.
+
+        Note what is NOT here: any notion of "the agent said it was safe". The
+        classification is a property of the diff text, computed the same way
+        every time, so a persuasive rationale cannot lower a risk class.
+        """
+        files = tuple(sorted({line[6:].strip()
+                              for line in diff.splitlines()
+                              if line.startswith("+++ b/")}))
+        added = sum(1 for l in diff.splitlines()
+                    if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff.splitlines()
+                      if l.startswith("-") and not l.startswith("---"))
+
+        findings: list[PatchFinding] = []
+        for name, pattern, risk, detail in _PATCH_RULES:
+            if name == "wide-change":
+                # One file is routine; several in one automated fix is not.
+                if len(files) > 1:
+                    findings.append(PatchFinding(
+                        rule=name, risk=PatchRisk.MEDIUM,
+                        detail=f"{len(files)} files in one proposed change"))
+                continue
+            for match in pattern.finditer(diff):
+                findings.append(PatchFinding(
+                    rule=name, risk=risk,
+                    detail=f"{detail}: {match.group(0).strip()[:100]}"))
+
+        return PatchScan(files_touched=files, added_lines=added,
+                         removed_lines=removed, findings=tuple(findings))
 
     @staticmethod
     def build_prompt_context(screened: Iterable[ScreenedText]) -> str:

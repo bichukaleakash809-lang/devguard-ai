@@ -128,21 +128,47 @@ class Archivist:
         screened: list[ScreenedText] = []
 
         if available:
-            for tool in sorted(DOCUMENT_TOOLS & caps.tool_names):
-                # Finding 18: read the live schema rather than assuming `query`.
-                schema = caps.describe(tool)
-                args = self._arguments_for(schema, query)
-                result = self._client.call(self.NAME, tool, args)
-                ref = self._pack.write(
-                    f"archivist/{tool}.json",
-                    {"arguments": args, "ok": result.ok, "text": result.text,
-                     "error": result.error},
-                    note="Raw document-retrieval response.",
+            # Two stages, because that is how the tools are actually designed —
+            # discovered the hard way in D6 (integration finding 22).
+            #
+            #   search_documents(query)      -> URNs + titles, deliberately NO
+            #                                   content ("to avoid context bloat")
+            #   grep_documents(urns, pattern) -> content for those specific URNs
+            #
+            # Calling them independently, as an earlier version did, gets a hit
+            # list with no bodies and a grep that fails for want of `urns`. The
+            # visible symptom was the worst possible one: DevGuard reporting
+            # "NO PRIOR KNOWLEDGE" while the runbook it had written minutes
+            # earlier sat in the result set.
+            search = self._client.call(self.NAME, "search_documents", {"query": query})
+            search_ref = self._pack.write(
+                "archivist/search_documents.json",
+                {"arguments": {"query": query}, "ok": search.ok,
+                 "text": search.text, "error": search.error},
+                note="Stage 1 — document discovery. Returns URNs and titles, not bodies.",
+            )
+            records.append(search.record(search_ref))
+
+            hits = _search_hits(search.text) if search.ok else []
+            if hits and caps.has("grep_documents"):
+                urns = [h["urn"] for h in hits]
+                grep_args = {"urns": urns, "pattern": query}
+                grep = self._client.call(self.NAME, "grep_documents", grep_args)
+                grep_ref = self._pack.write(
+                    "archivist/grep_documents.json",
+                    {"arguments": grep_args, "ok": grep.ok, "text": grep.text,
+                     "error": grep.error},
+                    note="Stage 2 — content for the URNs stage 1 found.",
                 )
-                records.append(result.record(ref))
-                if result.ok and result.text:
-                    for field, text in self._extract_documents(result.text):
-                        screened.append(self._sentinel.screen(field, text))
+                records.append(grep.record(grep_ref))
+                bodies = _grep_bodies(grep.text) if grep.ok else {}
+            else:
+                bodies = {}
+
+            for hit in hits:
+                body = bodies.get(hit["urn"]) or hit["title"]
+                screened.append(self._sentinel.screen(
+                    hit["urn"].replace(":", "_").replace("/", "_"), body))
 
             for doc in screened:
                 evidence.append(self._builder.make(
@@ -211,40 +237,58 @@ class Archivist:
         )
         return knowledge, all_evidence, handoff
 
-    # ------------------------------------------------------------------ helpers
 
-    @staticmethod
-    def _arguments_for(schema: dict, query: str) -> dict:
-        """Build arguments from the LIVE schema (finding 18).
+# --------------------------------------------------------------------- parsing
+#
+# Free functions so the response shapes are unit-testable without a live server,
+# and pinned against real captured payloads in tests/test_archivist_retrieval.py.
 
-        Picks the first required string property and passes the query as its
-        value. Crude, but it is driven by what the server says it wants rather
-        than by what the contract said it would want, which is the point.
-        """
-        props = (schema or {}).get("properties", {})
-        required = (schema or {}).get("required", [])
-        for name in required:
-            if props.get(name, {}).get("type") == "string":
-                return {name: query}
-        for name in ("query", "search", "text", "pattern"):
-            if name in props:
-                return {name: query}
-        return {"query": query}
+def _search_hits(text: str) -> list[dict]:
+    """URN + title per hit, read from `searchResults` — the real shape.
 
-    @staticmethod
-    def _extract_documents(text: str) -> list[tuple[str, str]]:
-        """Pull (label, body) pairs out of a document-search response."""
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return [("document-0", text)]
-        docs = payload.get("documents") or payload.get("results") or []
-        out: list[tuple[str, str]] = []
-        for i, doc in enumerate(docs if isinstance(docs, list) else []):
-            if isinstance(doc, dict):
-                label = doc.get("urn") or doc.get("title") or f"document-{i}"
-                body = json.dumps(doc, indent=2)
-            else:
-                label, body = f"document-{i}", str(doc)
-            out.append((str(label).replace("/", "_").replace(":", "_"), body))
-        return out
+    An earlier version looked for `documents` / `results`, keys the server does
+    not use, and therefore reported every successful search as empty.
+    """
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    hits: list[dict] = []
+    for result in (payload.get("searchResults") or []) if isinstance(payload, dict) else []:
+        entity = (result or {}).get("entity") or {}
+        urn = entity.get("urn")
+        if not isinstance(urn, str):
+            continue
+        hits.append({
+            "urn": urn,
+            "title": ((entity.get("info") or {}).get("title") or urn),
+            "sub_type": entity.get("subType"),
+        })
+    return hits
+
+
+def _grep_bodies(text: str) -> dict[str, str]:
+    """{urn: matched content} from a grep_documents response."""
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    bodies: dict[str, str] = {}
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            urn = node.get("urn") or node.get("documentUrn")
+            matches = node.get("matches") or node.get("snippets") or node.get("content")
+            if isinstance(urn, str) and matches is not None:
+                if isinstance(matches, list):
+                    rendered = "\n".join(
+                        m.get("text", json.dumps(m)) if isinstance(m, dict) else str(m)
+                        for m in matches)
+                else:
+                    rendered = str(matches)
+                bodies.setdefault(urn, rendered)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return bodies
