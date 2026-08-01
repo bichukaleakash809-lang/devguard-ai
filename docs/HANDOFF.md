@@ -14,11 +14,10 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D7 COMPLETE.**
-**D8 is the next phase and has NOT been started.** D8 is §9B (the
-fault-injection eval suite, 5–8 faults plus a control expecting
-`INSUFFICIENT_EVIDENCE`) and §11 security work including the live injection
-demo. Read `evidence/d7/README.md` first. The hero-loop rename is **still in
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D7 COMPLETE. D8 §9B COMPLETE.**
+**§11's security work — including the live injection demo (§11.7) and the
+least-privilege service account (§11.4) — is NOT done.** It was explicitly
+scoped out of D8, which was §9B only. Read `evidence/d8/README.md` first. The hero-loop rename is **still in
 place** and dbt is **still red on purpose** — that is the committed state, and
 D3–D7 evidence all depend on it. `scripts/reset_demo.py` restores it after any
 run.
@@ -1343,6 +1342,72 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D8 (§9B ONLY) COMPLETE — THE FAULT-INJECTION EVAL SUITE
+
+Evidence: **`evidence/d8/README.md`** · published: **`examples/eval/`** ·
+`make eval` runs it.
+
+```
+accuracy            : 7/7 = 100.0%
+false positives     : 0/2 = 0.0%
+false negatives     : 0
+faults with a signal: 5/7
+```
+
+### Do NOT quote 7/7 as the result
+
+Seven hand-written faults scored by a classifier from the same repository is
+**weak evidence by construction**. The classifier does not know which fault was
+injected (it sees only `dbt build` output), so the score is falsifiable — but
+the faults and the patterns share an author. The published README says this in
+its own words, above the table, and a test asserts the caveat is present.
+
+**The two results that matter:**
+* **FP rate 0/2.** §9B's control got `INSUFFICIENT_EVIDENCE`. A system that
+  invents a root cause when nothing is wrong is worse than one that detects
+  nothing.
+* **`silent_value_drift` was invisible and DevGuard said so.** amount_cents ×100:
+  everything builds, every test passes, every downstream number is wrong by
+  100×. Scored correct because refusing is right when you cannot see — and it is
+  **a real limitation**, not a handled case. No distribution checks exist.
+
+5/7 faults produced any signal at all, deliberately: an eval where everything is
+detectable measures nothing about refusal.
+
+### Still not LLM diagnosis
+
+The Diagnostician still cannot run. This scores the **deterministic
+detection-and-classification path**. `results.json` carries that sentence in a
+`measures` field so it travels with the data.
+
+### Isolation, forced by two real constraints
+
+Faults hit **`raw_eval`** (a per-run clone of `raw`); models build into
+`analytics_eval*` as the non-superuser **`devguard_eval`**; all dropped in a
+`finally`. Both constraints were found by running it:
+1. `REVOKE` against a superuser is a **silent no-op** — `permission_revoked`
+   would have "passed" by never breaking anything.
+2. PostgreSQL refuses `ALTER COLUMN … TYPE` while a **view** depends on the
+   column — `type_change` died twice, finally on the *production*
+   `analytics_staging.stg_orders`. Cloning removes the conflict.
+
+Verified after: users 2000, orders 20000, null amounts 0, mart 1715, zero
+leftover schemas or roles, hero-loop break still in place.
+
+A **green baseline** runs before any fault; if it is not green the eval refuses
+to score and exits 3.
+
+### Additive substrate changes (dbt run behaviour unchanged)
+
+* `models/staging/schema.yml` — standard unique/not_null tests. Without any
+  tests `dbt build` == `dbt run` and no data-quality fault produces a signal.
+  Not tuned to the faults: `silent_value_drift` is caught by nothing.
+* `sources.yml` — raw schema is now `env_var('SUBSTRATE_RAW_SCHEMA', 'raw')`.
+
+Tests 556 → 589.
 
 ---
 

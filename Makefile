@@ -36,6 +36,18 @@ test:  ## Run the test suite (no API key or network required)
 verify-otel:  ## Prove OTLP export + trace context + log correlation are real
 	$(PYTHON) scripts/verify_otel.py
 
+.PHONY: eval
+eval:  ## Fault-injection evaluation suite (05 §9B). Needs the substrate Postgres.
+	$(PYTHON) scripts/run_eval.py
+	$(PYTHON) scripts/render_eval_readme.py
+	@echo ""
+	@echo "eval: results in examples/eval/ (README.md is generated from results.json)"
+
+.PHONY: ablation
+ablation:  ## Retrieval ablation (05 §9A). Needs the substrate, DataHub and a token.
+	$(PYTHON) scripts/run_ablation.py -n 5
+	$(PYTHON) scripts/render_ablation_readme.py
+
 .PHONY: verify
 verify: test verify-otel lint build  ## Everything CI runs, locally
 	@echo ""
