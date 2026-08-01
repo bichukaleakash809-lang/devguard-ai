@@ -14,12 +14,13 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0, D1, D2, D3, D4 COMPLETE.**
-**D5 is the next phase and has NOT been started.** D5 is the Diagnostician and
-the refusal path — the second half of the §14 D4–D5 gate ("refusal
-demonstrated"). Read `evidence/d4/README.md` and then `evidence/d3/README.md`
-before touching the substrate: the hero-loop rename is **still in place** and
-dbt is **still red on purpose**, and D4's evidence chain depends on it.
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D5 COMPLETE.**
+**D6 is the next phase and has NOT been started.** D6 is the write side —
+Surgeon, Referee, Magistrate, Scribe (§4 steps 11–18). Read
+`evidence/d5/README.md` first, then `evidence/d4/` and `evidence/d3/`: the
+hero-loop rename is **still in place** and dbt is **still red on purpose**, and
+both D4's and D5's evidence depend on it. Do not repair the substrate before D6
+intends to.
 
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
@@ -1341,6 +1342,80 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D5 COMPLETE — REFUSAL DEMONSTRATED, ON A REAL ONE-SIDED CHAIN
+
+Evidence: **`evidence/d5/README.md`** · packs: `evidence/proof-pack/d5-refusal/`
+and `evidence/proof-pack/d5-full/`.
+
+D5 completes the §14 D4–D5 row. D4 gave "evidence chain formed"; D5 gives
+**"refusal demonstrated"** — live, not simulated.
+
+```
+$ python scripts/run_d5_diagnosis.py --scenario refusal
+[watcher] exit=1 column=user_id -> OK
+[mcp] UNAVAILABLE -> DataHubUnavailableError
+[diagnostician] verdict   : INSUFFICIENT_EVIDENCE
+[diagnostician] is_refusal: True
+[diagnostician] model     : None
+evidence items : 4 | sources: ['RUNTIME'] | CHAIN IS SUFFICIENT : False
+```
+
+Real `dbt run` failure (4 genuine RUNTIME items), catalog pointed at
+`localhost:1` where nothing listens, so the MCP server really failed and the
+chain is one-sided **because it is**. "The catalog is down" was chosen over a
+contrived gap because it is a real production case.
+
+### The distinction that carries the whole phase
+
+| | refusal | full |
+|---|---|---|
+| chain sufficient | **False** | **True** |
+| verdict | `INSUFFICIENT_EVIDENCE` | `REASONER_UNAVAILABLE` |
+| **is_refusal** | **True** | **False** |
+
+Both runs end with no root cause, for completely different reasons. One **judged
+the evidence insufficient**; the other **never asked**, because `api.groq.com`
+is unreachable and the chain was fine. Reporting the second as a refusal would
+claim a judgement DevGuard never made — and would have scored this gate for
+free. `Diagnosis.is_refusal` excludes `REASONER_UNAVAILABLE`, and
+`tests/test_d5_scenarios.py` pins it against both committed packs.
+
+### Structural, not prompted
+
+* Refusal runs **before** the prompt is built — deterministic, no model, no
+  network, no tokens. So injected catalog text cannot argue it away: the text
+  never reaches a decision point. Pinned by
+  `test_a_refusal_cannot_be_talked_out_of_by_injected_text`.
+* The model's answer is **validated against the chain**, not trusted. A cited
+  evidence id that does not exist discards the conclusion. Citations must
+  themselves span RUNTIME **and** DATAHUB_GRAPH — §7's rule applied to what
+  actually supports the answer, not merely to the pool.
+* Zero tools: `__init__` takes no client, the module never imports
+  `datahub_client` (asserted by AST), allowlist is empty, `tool_calls == ()`.
+
+### Write-back: none, deliberately
+
+§8's package is post-verification only and D5 verified nothing. The refusal was
+**not** written to the live incident — it came from a scenario where we made the
+catalog unreachable, while the real incident's chain is sufficient; recording it
+would misrepresent both. `devguard.verified_at` and `time_to_root_cause_s`
+remain unset. Incident `f01f744b-…` stays ACTIVE, which is still accurate.
+
+### Still open after D5
+
+* **The success path has never run.** `ROOT_CAUSE_IDENTIFIED` has only ever come
+  from `ScriptedReasoner`, which labels itself `scripted` in `Diagnosis.model`.
+  Re-probed today: `CONNECT tunnel failed, response 403`, control host 200, and
+  **no `GROQ_API_KEY` in the environment either**.
+* §11.7's injection demo beat still not built — `untrusted items : 0` in both
+  runs is honest but untested against a hostile catalog entry.
+* The two runner scripts overlap ~50 lines; D5's deliberately does not import
+  D4's, because refactoring it would mean re-running it and overwriting verified
+  evidence. Consolidate in D6.
+* Substrate still broken on purpose. §11.4 service account, fifth phase running.
 
 ---
 
