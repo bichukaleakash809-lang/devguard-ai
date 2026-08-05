@@ -14,13 +14,28 @@ file. Last action — update it.
 **T2 — SigNoz + MCP. PARTIALLY COMPLETE. Blocked on infrastructure for the rest.**
 **Post-T2 hardening — IN PROGRESS. Non-blocked improvements, each verified.**
 
-**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D9 COMPLETE.**
-All of §11 is now done and verified live. Read `evidence/d9/README.md` first —
-it contains the single most important operational fact in the project:
-**DataHub was not enforcing authorization at all until D9.** The hero-loop rename is **still in
-place** and dbt is **still red on purpose** — that is the committed state, and
-D3–D7 evidence all depend on it. `scripts/reset_demo.py` restores it after any
-run.
+**DataHub track (`docs/05_DATAHUB_MASTER.md`): D0–D10 COMPLETE.**
+All of §11 is done and verified live, and all of §10's **Floor** is now built.
+Read `evidence/d9/README.md` first — it contains the single most important
+operational fact in the project: **DataHub was not enforcing authorization at all
+until D9.** Then read `evidence/d10/README.md` for the UI. The hero-loop rename is
+**still in place** and dbt is **still red on purpose** — that is the committed
+state, and D3–D7 evidence all depend on it. `scripts/reset_demo.py` restores it
+after any run.
+
+**The phase numbers no longer line up with §14's calendar, and this matters for
+picking up the next piece of work.** The calendar puts §10 (UI Floor + replay) on
+D9 and reproducibility on D10. The repo split calendar-D8 across two phases —
+repo-D8 did §9B only, repo-D9 did §11 — so §10 was still unexecuted and repo-D10
+delivered it. **Calendar-D10, "reproducibility day", has NOT been done:** fresh
+container, clean clone, `make doctor` / `make demo` / `make reset-demo` /
+`make eval` / `make verify` all green on a machine that never saw the project,
+redaction pass, version matrix into the README. That is the next contract phase.
+
+The §10 **Ceiling** is deliberately not started (evaluation dashboard, ablation
+view, timeline scrubber, theming, animated transitions, multi-incident history).
+§10 gates it on "only after Aug 6, and only if the Floor is frozen", and the cut
+order puts it first out.
 
 **T2 is NOT fully verified and must not be reported as such.** Four of its seven
 sections are done and evidenced; three cannot be executed in this environment.
@@ -1342,6 +1357,78 @@ finding.
    gitlink (open issue 5).
 
 Continuing past this point would mean inventing work. Do not.
+
+---
+
+## D10 COMPLETE — §10's FLOOR AND ZERO-INFRASTRUCTURE REPLAY
+
+Full write-up: `evidence/d10/README.md`. Screenshots in
+`evidence/d10/screenshots/`.
+
+All eleven §10 Floor items exist at `/command?run=<run-id>`, driven entirely by
+the committed proof packs. Three commands, none of which need DataHub, Postgres,
+a Groq key or the backend:
+
+```bash
+make replay              # 7 proof packs -> self-contained bundles
+make replay-serve        # static export + http.server; open /command/
+make verify-replay-ui    # drives the built site in a real browser: 14 checks
+```
+
+**How it works.** `scripts/build_replay.py` compiles each proof pack into one
+self-contained JSON with **every raw payload embedded**, keyed by the same
+`raw_ref` string `INDEX.json` already uses. That embedding is what makes
+§10.11's "zero infrastructure" literally true — clicking an evidence chip is a
+dictionary lookup, not a file read. `NEXT_OUTPUT=export` switches the Next build
+from `standalone` (which `frontend/Dockerfile` needs) to a static export;
+`next.config.js` carries both modes.
+
+**Do not commit `frontend/public/replay/`.** It is generated and gitignored. A
+committed copy is a second copy of evidence already in the repo, and it can
+drift from the pack it claims to render.
+
+### The rule that shaped every panel
+
+§10.10: unknown values render `N/A`, never a placeholder number. Every `None` in
+a bundle carries a reason in `bundle.missing`, the UI shows it on hover, and the
+bottom panel lists all of them. Three places where this bit:
+
+* **Cost is `N/A` on every run, and must stay that way** until a model actually
+  runs. No model was invoked anywhere in D4–D6 — every handoff records
+  `model: null`, the Diagnostician reports `REASONER_UNAVAILABLE`, Groq is
+  blocked (`docs/TODO-BLOCKED.md` blocker 1). `$0.00` would claim the loop was
+  free rather than unmeasured. Same for tokens: `0` is recorded and labelled as
+  such, not presented as a measurement.
+* **A refused run reports no time-to-root-cause.** The first version showed
+  33.05 s for `d5-refusal` — a success metric directly above a full-width
+  INSUFFICIENT EVIDENCE panel, on the one run that produced no root cause.
+* **`BLOCKED` is not drawn as a refusal.** The D6 Diagnostician's own rationale
+  says so explicitly: *"the evidence chain is sufficient, so this is NOT a
+  refusal — the question was never asked."* Only `INSUFFICIENT_EVIDENCE` gets
+  §10.6's treatment. This is the flattering error to make, so the tests pin it.
+
+### Two bugs worth remembering
+
+**The prior-knowledge banner said the opposite of the truth.** The document
+parser looked for a flat `documents` list; DataHub returns
+`searchResults[].entity` with the title at `info.title`. So §10.5 rendered **NO
+PRIOR VERIFIED INCIDENTS** on the same screen where the Archivist reported *"4
+document(s) retrieved"*. Two panels contradicting each other. If you touch the
+retrieval path, `test_prior_knowledge_agrees_with_the_archivist` is the guard.
+
+**Every panel "open raw" button was dead** — panels emitted `<run-id>/…` while
+the raw map is keyed `evidence/proof-pack/<run-id>/…`. Evidence chips worked, so
+nothing looked broken. There is one canonical spelling now (`_ref`), and
+`test_every_raw_ref_resolves` checks every ref in all seven packs. **Any new
+panel ref must go through `_ref`.**
+
+### Verification
+
+`tests/test_replay_bundle.py` — 48 tests, parametrised over all seven packs.
+`make verify-replay-ui` — 14/14 in a real browser against the real static
+export, with no backend running. Full suite 676 passed. `npm run lint` — 8
+warnings, all pre-existing in `app/page.tsx`, `app/result/page.tsx` and
+`app/scanner/page.tsx`; zero from the new code. Secret scan clean.
 
 ---
 

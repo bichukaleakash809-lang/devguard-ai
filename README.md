@@ -141,6 +141,34 @@ Open `http://localhost:3000`, paste a vulnerable snippet, hit **Run DevGuard AI 
   They evaluate but cannot page anyone until a notification channel is added.
 - **MCP** — `backend/core/mcp_client.py` provides a fail-safe client interface for the SigNoz MCP server. **It has not been verified against a real MCP server**: the transport and response shapes are unconfirmed (the file carries its own TODO). When the call path is unavailable the cost query falls back to an in-process estimate, which is reported as `data_source: "local_shadow"` — never as live telemetry.
 
+## Command Center — replay a real recorded run
+
+The incident UI (`05 §10`) runs from the **committed proof packs** with no
+DataHub, no Postgres, no API key and no backend:
+
+```bash
+make replay-serve    # builds the bundles + a static export, then serves it
+```
+
+Open `http://localhost:8000/command/`. Seven recorded runs are selectable,
+including:
+
+* `d6-loop-pass2` — the complete loop, ending in five write-back artifacts that
+  really landed in DataHub;
+* `d5-refusal` — the Diagnostician declining to guess, naming the exact evidence
+  class it was missing;
+* `d6-fail-the-fix` — the proposed fix failing validation, so the loop never
+  reaches a human and never writes.
+
+Every number on that screen is read out of a proof pack, and every evidence chip
+opens the exact captured request/response behind its claim. Values that were
+never measured render `N/A` with the reason attached — notably cost, because no
+model was reachable in the environment these runs were captured in. The banner
+says **REPLAY OF RECORDED RUN — NOT LIVE** and cannot be dismissed.
+
+To check that claim rather than take it: `make verify-replay-ui` drives the
+built site in a real browser with nothing else running.
+
 ## Reproducibility
 
 **What is verified and reproducible today**, on a clean checkout with no
@@ -149,6 +177,7 @@ container registry and no API key:
 ```bash
 make doctor          # reports exactly what is present and what is missing
 make test            # the test suite (no key, no collector, no network)
+make replay          # replay bundles from the committed proof packs
 python scripts/verify_otel.py    # boots the real app, asserts decoded OTLP
 ```
 

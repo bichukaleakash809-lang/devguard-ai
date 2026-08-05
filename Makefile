@@ -52,6 +52,37 @@ ablation:  ## Retrieval ablation (05 §9A). Needs the substrate, DataHub and a t
 scan-secrets:  ## Secret scan over every tracked file (05 §11.8)
 	$(PYTHON) scripts/scan_secrets.py
 
+.PHONY: replay
+replay:  ## Build replay bundles from the committed proof packs (05 §10.11)
+	$(PYTHON) scripts/build_replay.py
+	@echo ""
+	@echo "replay: bundles in frontend/public/replay/. 'make replay-serve' to view them."
+
+# The whole point of §10.11 is that this needs nothing: no DataHub, no LLM key,
+# no Postgres, no backend. It is a static export served as files.
+.PHONY: replay-build
+replay-build: replay  ## Static export of the Command Center — zero infrastructure
+	cd frontend && NEXT_OUTPUT=export npm run build
+	@echo ""
+	@echo "replay-build: static site in frontend/out/ — open /command/"
+
+.PHONY: replay-serve
+replay-serve: replay-build  ## Serve the static replay UI on PORT (default 8000)
+	@echo "Command Center: http://localhost:$(PORT)/command/"
+	cd frontend/out && $(PYTHON) -m http.server $(PORT)
+
+# Not part of `verify`: it needs a browser binary, and pinning playwright as a
+# devDependency would put a browser download into every CI install for a check
+# CI does not run. Installed on demand here instead.
+.PHONY: verify-replay-ui
+verify-replay-ui: replay-build  ## Drive the built replay UI in a browser and assert §10.11
+	cd frontend && npm install --no-save --no-audit --no-fund playwright
+	cd frontend/out && $(PYTHON) -m http.server 8931 & echo $$! > /tmp/devguard-replay.pid
+	@sleep 2
+	cd frontend && node scripts/verify_replay_ui.mjs; \
+	  status=$$?; kill `cat /tmp/devguard-replay.pid` 2>/dev/null; \
+	  rm -f /tmp/devguard-replay.pid; exit $$status
+
 .PHONY: verify
 verify: test scan-secrets verify-otel lint build  ## Everything CI runs, locally
 	@echo ""
